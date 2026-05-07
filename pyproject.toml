@@ -9,14 +9,15 @@ dependencies = [
     # dreamerv3-pytorch / sheeprl: soft-imported in targets/wm_dreamerv3.py
     # transformers (HF LeWorldModel): soft-imported in targets/wm_leworldmodel.py
     "pyyaml",
-    # configs is a workspace sibling leaf package; adapters loads YAML configs via load_config
-    "lerobot-isaac-configs",
+    # NOTE: sibling `lerobot-isaac-configs` is NOT listed — pixi installs it as editable
+    # workspace dep via root pixi.toml pypi-dependencies (avoids URL conflict). See [monorepo] extra.
 ]
 
 [project.optional-dependencies]
 lerobot = ["lerobot"]
 dreamerv3 = ["sheeprl"]
 leworldmodel = ["transformers", "datasets"]
+monorepo = ["lerobot-isaac-configs"]
 
 [project.scripts]
 lerobot-isaac-train = "lerobot_isaac_adapters.train:main"
