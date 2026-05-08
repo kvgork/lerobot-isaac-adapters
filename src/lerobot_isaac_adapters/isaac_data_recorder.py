@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Callable, Optional
+from collections.abc import Callable
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +57,18 @@ _FEATURES = {
         "dtype": "float32",
         "shape": (12,),
         "names": [
-            "joint_pos_0", "joint_pos_1", "joint_pos_2",
-            "joint_pos_3", "joint_pos_4", "joint_pos_5",
-            "joint_vel_0", "joint_vel_1", "joint_vel_2",
-            "joint_vel_3", "joint_vel_4", "joint_vel_5",
+            "joint_pos_0",
+            "joint_pos_1",
+            "joint_pos_2",
+            "joint_pos_3",
+            "joint_pos_4",
+            "joint_pos_5",
+            "joint_vel_0",
+            "joint_vel_1",
+            "joint_vel_2",
+            "joint_vel_3",
+            "joint_vel_4",
+            "joint_vel_5",
         ],
     },
     "observation.images.wrist": {
@@ -77,8 +85,12 @@ _FEATURES = {
         "dtype": "float32",
         "shape": (6,),
         "names": [
-            "joint_0", "joint_1", "joint_2",
-            "joint_3", "joint_4", "joint_5",
+            "joint_0",
+            "joint_1",
+            "joint_2",
+            "joint_3",
+            "joint_4",
+            "joint_5",
         ],
     },
 }
@@ -88,12 +100,13 @@ _FEATURES = {
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def record_episodes(
     env_id: str,
     output_dir: str | Path,
     num_episodes: int = 10,
-    policy_fn: Optional[Callable] = None,
-    policy_checkpoint: Optional[str] = None,
+    policy_fn: Callable | None = None,
+    policy_checkpoint: str | None = None,
     seed: int = 42,
 ) -> Path:
     """Roll out episodes in an Isaac Lab env and write to LeRobotDataset Parquet.
@@ -167,13 +180,11 @@ def record_episodes(
     )
 
     import numpy as np
-    import time
 
     for ep_idx in range(num_episodes):
         obs, _ = env.reset()
         done = False
         step_idx = 0
-        t0 = time.monotonic()
 
         while not done:
             if policy_fn is not None:
@@ -186,8 +197,12 @@ def record_episodes(
 
             frame = {
                 "observation.state": np.array(obs["joint_pos_vel"], dtype="float32"),
-                "observation.images.wrist": np.array(obs["wrist_cam_rgb"], dtype="uint8"),
-                "observation.images.overhead": np.array(obs["overhead_cam_rgb"], dtype="uint8"),
+                "observation.images.wrist": np.array(
+                    obs["wrist_cam_rgb"], dtype="uint8"
+                ),
+                "observation.images.overhead": np.array(
+                    obs["overhead_cam_rgb"], dtype="uint8"
+                ),
                 "action": np.array(action, dtype="float32"),
             }
             dataset.add_frame(frame)
@@ -213,6 +228,7 @@ def record_episodes(
 # Private helpers
 # ---------------------------------------------------------------------------
 
+
 def _load_policy_checkpoint(checkpoint_path: str) -> Callable:
     """Load a LeRobot policy checkpoint and return an inference callable.
 
@@ -235,6 +251,7 @@ def _load_policy_checkpoint(checkpoint_path: str) -> Callable:
 
     def _infer(obs_dict):
         import numpy as np
+
         with torch.no_grad():
             obs_tensors = {
                 k: torch.from_numpy(np.array(v)).float().unsqueeze(0)
@@ -250,7 +267,8 @@ def _load_policy_checkpoint(checkpoint_path: str) -> Callable:
 # CLI entrypoint
 # ---------------------------------------------------------------------------
 
-def main(argv: Optional[list] = None) -> None:
+
+def main(argv: list | None = None) -> None:
     """CLI wrapper for ``record_episodes``.
 
     Example::
@@ -307,4 +325,5 @@ def main(argv: Optional[list] = None) -> None:
 
 if __name__ == "__main__":
     import sys
+
     main(sys.argv[1:])

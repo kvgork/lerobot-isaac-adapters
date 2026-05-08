@@ -31,9 +31,9 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +62,9 @@ class OperationResult:
     """Standardised result from apply_quality_filter."""
 
     success: bool
-    data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-    suggestions: Optional[List[str]] = None
+    data: dict[str, Any] | None = None
+    error: str | None = None
+    suggestions: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +85,7 @@ def _import_skill() -> Any:
         injected = True
     try:
         from skills.lerobot_dataset_quality.operations import filter_dataset  # type: ignore[import]
+
         logger.debug("Tier 1 skill import succeeded from %s", claude_root)
         return filter_dataset
     except ImportError as exc:
@@ -183,7 +184,7 @@ def apply_quality_filter(
     sal_threshold: float = 0.2,
     ted_threshold: float = 2.0,
     min_episode_length: int = 50,
-    output_path: Optional[str | Path] = None,
+    output_path: str | Path | None = None,
     dry_run: bool = False,
 ) -> OperationResult:
     """Filter a LeRobotDataset using SAL and TED quality metrics.

@@ -18,20 +18,16 @@ Covers:
 from __future__ import annotations
 
 import argparse
-import sys
-from io import StringIO
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from lerobot_isaac_adapters.targets import policy_lerobot, wm_dreamerv3, wm_leworldmodel
-from lerobot_isaac_adapters.train import _build_parser
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_args(**kwargs) -> argparse.Namespace:
     """Build a minimal Namespace for target run() calls."""
@@ -64,6 +60,7 @@ def _mock_popen(returncode: int = 0, stdout_lines: list[str] | None = None):
 # ---------------------------------------------------------------------------
 # policy_lerobot
 # ---------------------------------------------------------------------------
+
 
 class TestPolicyLerobotSubprocess:
     """policy_lerobot.run() must build the correct lerobot-train command."""
@@ -181,6 +178,7 @@ class TestPolicyLerobotSubprocess:
 # wm_dreamerv3 — dry_run path (no conversion needed)
 # ---------------------------------------------------------------------------
 
+
 class TestWmDreamerv3DryRun:
     """wm_dreamerv3.run() dry_run must print both steps without spawning processes."""
 
@@ -242,6 +240,7 @@ class TestWmDreamerv3DryRun:
 # wm_leworldmodel — dry_run path
 # ---------------------------------------------------------------------------
 
+
 class TestWmLeWorldModelDryRun:
     """wm_leworldmodel.run() dry_run must print both steps without spawning processes."""
 
@@ -298,6 +297,7 @@ class TestWmLeWorldModelDryRun:
 # wm_dreamerv3 — real run subprocess wiring
 # ---------------------------------------------------------------------------
 
+
 class TestWmDreamerv3Subprocess:
     """wm_dreamerv3.run() real path must call sheeprl with correct args."""
 
@@ -325,7 +325,7 @@ class TestWmDreamerv3Subprocess:
         # Verify sheeprl is invoked
         assert any("sheeprl" in part for part in cmd), f"sheeprl not in cmd: {cmd}"
         assert "exp=dreamer_v3" in cmd
-        assert f"total_steps=100" in cmd
+        assert "total_steps=100" in cmd
 
     def test_sheeprl_nonzero_returncode_propagated(self, tmp_path) -> None:
         hdf5_path = tmp_path / "dreamerv3_data.hdf5"
@@ -380,6 +380,7 @@ class TestWmDreamerv3Subprocess:
 # ---------------------------------------------------------------------------
 # wm_leworldmodel — real run subprocess wiring
 # ---------------------------------------------------------------------------
+
 
 class TestWmLeWorldModelSubprocess:
     """wm_leworldmodel.run() real path must call lerobot.scripts.train_world_model."""

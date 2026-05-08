@@ -29,10 +29,10 @@ from __future__ import annotations
 import argparse
 import re
 import shlex
-import subprocess
-import sys
-from typing import Optional
 
+from lerobot_isaac_adapters.targets._subprocess import stream_training_subprocess
+
+# `eval/pc_success=` -> re-emitted as `pc_success=` for the executor regex.
 _PC_SUCCESS_RE = re.compile(r"eval/pc_success[=:\s]+([0-9.eE+\-]+)")
 
 
@@ -110,35 +110,10 @@ def run(args: argparse.Namespace) -> int:
         print(shlex.join(cmd))
         return 0
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        print(
-            "[policy_lerobot] ERROR: 'lerobot-train' not found in PATH. "
-            "Install LeRobot: pip install lerobot",
-            file=sys.stderr,
-        )
-        return 127
-
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        m = _PC_SUCCESS_RE.search(line)
-        if m:
-            from lerobot_isaac_adapters.metric_extractor import emit
-            emit("pc_success", float(m.group(1)))
-
-    proc.wait()
-    if proc.returncode != 0:
-        print(
-            f"\033[31m[policy_lerobot] Training failed (exit={proc.returncode}) "
-            f"— see stdout above\033[0m",
-            file=sys.stderr,
-        )
-    return proc.returncode
+    return stream_training_subprocess(
+        cmd,
+        metric_re=_PC_SUCCESS_RE,
+        metric_name="pc_success",
+        label="policy_lerobot",
+        install_hint="Install LeRobot: pip install lerobot",
+    )

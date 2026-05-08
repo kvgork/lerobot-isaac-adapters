@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import sys
-from typing import NoReturn
 
 _POLICY_ARCHS = ("smolvla", "act", "diffusion")
 _WM_ARCHS = ("dreamerv3", "le_world_model")

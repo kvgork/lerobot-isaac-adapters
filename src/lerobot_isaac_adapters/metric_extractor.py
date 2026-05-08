@@ -35,10 +35,10 @@ from __future__ import annotations
 
 import sys
 from contextlib import contextmanager
-from typing import Generator, Optional
+from collections.abc import Generator
 
 
-def emit(name: str, value: float, step: Optional[int] = None) -> None:
+def emit(name: str, value: float, step: int | None = None) -> None:
     """Print a single metric line to stdout in the autoresearch-compatible format.
 
     The output format is::
@@ -97,12 +97,12 @@ class MetricEmitter:
     def __init__(self, prefix: str = "") -> None:
         self._prefix = prefix
 
-    def emit(self, name: str, value: float, step: Optional[int] = None) -> None:
+    def emit(self, name: str, value: float, step: int | None = None) -> None:
         """Emit a metric, optionally prepending the configured prefix."""
         full_name = f"{self._prefix}_{name}" if self._prefix else name
         emit(full_name, value, step=step)
 
-    def __enter__(self) -> "MetricEmitter":
+    def __enter__(self) -> MetricEmitter:
         return self
 
     def __exit__(self, *_exc) -> None:

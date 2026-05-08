@@ -13,11 +13,9 @@ Verify that train.py argparse layer:
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -110,11 +108,15 @@ class TestDispatchDryRunReturnsZero:
     @pytest.mark.parametrize("arch", VALID_ARCHS)
     def test_dry_run_returns_zero(self, arch: str) -> None:
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", arch,
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                arch,
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         result = _dispatch(args)
         assert result == 0
 
@@ -124,25 +126,40 @@ class TestArgparsePassthrough:
 
     def test_remainder_captured(self) -> None:
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "act",
-            "--dataset", "/tmp/ds",
-            "--", "--policy.n_action_steps=100",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "act",
+                "--dataset",
+                "/tmp/ds",
+                "--",
+                "--policy.n_action_steps=100",
+            ]
+        )
         assert "--policy.n_action_steps=100" in args.remainder
 
     def test_all_custom_args(self) -> None:
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "dreamerv3",
-            "--dataset", "my/dataset",
-            "--config", "/tmp/config.yaml",
-            "--output_dir", "/tmp/out",
-            "--steps", "10000",
-            "--batch_size", "16",
-            "--lr", "3e-4",
-            "--seed", "7",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "dreamerv3",
+                "--dataset",
+                "my/dataset",
+                "--config",
+                "/tmp/config.yaml",
+                "--output_dir",
+                "/tmp/out",
+                "--steps",
+                "10000",
+                "--batch_size",
+                "16",
+                "--lr",
+                "3e-4",
+                "--seed",
+                "7",
+            ]
+        )
         assert args.target_arch == "dreamerv3"
         assert args.dataset == "my/dataset"
         assert args.config == "/tmp/config.yaml"
@@ -167,11 +184,15 @@ class TestDryRun:
     def test_dry_run_returns_zero_and_does_not_raise(self, arch: str) -> None:
         """_dispatch with --dry_run returns 0 and never spawns subprocess."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", arch,
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                arch,
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         result = _dispatch(args)
         assert result == 0
 
@@ -184,16 +205,25 @@ class TestDryRun:
     def test_dry_run_prints_key_args(self, capsys) -> None:
         """dry-run output contains target_arch, dataset, output_dir, steps, batch_size, lr, seed."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "smolvla",
-            "--dataset", "lerobot/pusht",
-            "--output_dir", "/tmp/out",
-            "--steps", "1000",
-            "--batch_size", "8",
-            "--lr", "3e-4",
-            "--seed", "7",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "smolvla",
+                "--dataset",
+                "lerobot/pusht",
+                "--output_dir",
+                "/tmp/out",
+                "--steps",
+                "1000",
+                "--batch_size",
+                "8",
+                "--lr",
+                "3e-4",
+                "--seed",
+                "7",
+                "--dry_run",
+            ]
+        )
         _dispatch(args)
         captured = capsys.readouterr()
         assert "smolvla" in captured.out
@@ -206,11 +236,15 @@ class TestDryRun:
     def test_policy_dry_run_prints_lerobot_train(self, capsys) -> None:
         """Policy dry-run output must include 'lerobot-train'."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "smolvla",
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "smolvla",
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         _dispatch(args)
         captured = capsys.readouterr()
         assert "lerobot-train" in captured.out, (
@@ -220,25 +254,35 @@ class TestDryRun:
     def test_dreamerv3_dry_run_prints_sheeprl(self, capsys) -> None:
         """DreamerV3 dry-run output must include 'sheeprl'."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "dreamerv3",
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "dreamerv3",
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         _dispatch(args)
         captured = capsys.readouterr()
         assert "sheeprl" in captured.out, (
             f"Expected 'sheeprl' in dry-run output.\nstdout: {captured.out!r}"
         )
 
-    def test_leworldmodel_dry_run_prints_lerobot_train_world_model(self, capsys) -> None:
+    def test_leworldmodel_dry_run_prints_lerobot_train_world_model(
+        self, capsys
+    ) -> None:
         """LeWorldModel dry-run output must include 'train_world_model'."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", "le_world_model",
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                "le_world_model",
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         _dispatch(args)
         captured = capsys.readouterr()
         assert "train_world_model" in captured.out, (
@@ -249,11 +293,15 @@ class TestDryRun:
     def test_policy_arch_dry_run_prints_policy_type(self, arch: str, capsys) -> None:
         """Policy archs dry-run must include the correct --policy.type flag."""
         parser = _build_parser()
-        args = parser.parse_args([
-            "--target_arch", arch,
-            "--dataset", "lerobot/pusht",
-            "--dry_run",
-        ])
+        args = parser.parse_args(
+            [
+                "--target_arch",
+                arch,
+                "--dataset",
+                "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
         _dispatch(args)
         captured = capsys.readouterr()
         assert f"--policy.type={arch}" in captured.out, (

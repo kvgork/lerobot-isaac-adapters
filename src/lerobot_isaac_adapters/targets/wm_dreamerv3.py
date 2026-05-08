@@ -36,9 +36,10 @@ from __future__ import annotations
 import argparse
 import re
 import shlex
-import subprocess
 import sys
 from pathlib import Path
+
+from lerobot_isaac_adapters.targets._subprocess import stream_training_subprocess
 
 _RECON_LOSS_RE = re.compile(r"recon_loss[=:\s]+([0-9.eE+\-]+)")
 
@@ -91,9 +92,7 @@ def _convert_dataset(args: argparse.Namespace) -> Path:
         normalize_actions=True,
     )
     if not result.success:
-        raise RuntimeError(
-            f"[wm_dreamerv3] Dataset conversion failed: {result.error}"
-        )
+        raise RuntimeError(f"[wm_dreamerv3] Dataset conversion failed: {result.error}")
 
     print(f"[wm_dreamerv3] Conversion complete: {result.data}")
     return hdf5_path
@@ -138,7 +137,9 @@ def run(args: argparse.Namespace) -> int:
 
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
         cmd = [
-            "python", "-m", "sheeprl.cli",
+            "python",
+            "-m",
+            "sheeprl.cli",
             "exp=dreamer_v3",
             "env=custom_hdf5",  # user must register this env; see sheeprl docs
             f"env.dataset_path={resolved_hdf5}",
@@ -174,35 +175,10 @@ def run(args: argparse.Namespace) -> int:
     train_cmd = _build_train_cmd(hdf5_path)
 
     # Step 2: run sheeprl
-    try:
-        proc = subprocess.Popen(
-            train_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        print(
-            "[wm_dreamerv3] ERROR: 'sheeprl' not found. "
-            "Install: pip install sheeprl",
-            file=sys.stderr,
-        )
-        return 127
-
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        m = _RECON_LOSS_RE.search(line)
-        if m:
-            from lerobot_isaac_adapters.metric_extractor import emit
-            emit("recon_loss", float(m.group(1)))
-
-    proc.wait()
-    if proc.returncode != 0:
-        print(
-            f"\033[31m[wm_dreamerv3] Training failed (exit={proc.returncode}) "
-            f"— see stdout above\033[0m",
-            file=sys.stderr,
-        )
-    return proc.returncode
+    return stream_training_subprocess(
+        train_cmd,
+        metric_re=_RECON_LOSS_RE,
+        metric_name="recon_loss",
+        label="wm_dreamerv3",
+        install_hint="Install: pip install sheeprl",
+    )

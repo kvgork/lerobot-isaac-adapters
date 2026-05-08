@@ -14,7 +14,6 @@ Verify that metric_extractor:
 from __future__ import annotations
 
 import re
-import sys
 from io import StringIO
 from unittest.mock import patch
 
@@ -87,13 +86,16 @@ class TestEmitFormat:
 class TestAutoresearchRegex:
     """Verify the canonical autoresearch regex matches expected formats."""
 
-    @pytest.mark.parametrize("line,expected_name,expected_value", [
-        ("pc_success=0.73", "pc_success", 0.73),
-        ("recon_loss=0.0317", "recon_loss", 0.0317),
-        ("pred_loss=0.0214", "pred_loss", 0.0214),
-        ("val_loss=1e-5", "val_loss", 1e-5),
-        ("pc_success=0.73  # step=1000", "pc_success", 0.73),
-    ])
+    @pytest.mark.parametrize(
+        "line,expected_name,expected_value",
+        [
+            ("pc_success=0.73", "pc_success", 0.73),
+            ("recon_loss=0.0317", "recon_loss", 0.0317),
+            ("pred_loss=0.0214", "pred_loss", 0.0214),
+            ("val_loss=1e-5", "val_loss", 1e-5),
+            ("pc_success=0.73  # step=1000", "pc_success", 0.73),
+        ],
+    )
     def test_regex_matches(
         self, line: str, expected_name: str, expected_value: float
     ) -> None:
