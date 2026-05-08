@@ -150,22 +150,24 @@ def run(args: argparse.Namespace) -> int:
     if args.dataset and args.dataset.endswith((".h5", ".hdf5")):
         hdf5_path = Path(args.dataset)
 
-    train_cmd = [
-        sys.executable, "-m", "lerobot.scripts.train_world_model",
-        f"--dataset_path={hdf5_path}",
-        f"--batch_size={args.batch_size}",
-        f"--lr={args.lr}",
-        f"--num_steps={args.steps}",
-        f"--seed={args.seed}",
-        f"--output_dir={args.output_dir}",
-    ]
-    if args.config:
-        train_cmd.append(f"--config={args.config}")
-    if getattr(args, "remainder", None):
-        extra = [a for a in args.remainder if a != "--"]
-        train_cmd.extend(extra)
+    def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
+        cmd = [
+            sys.executable, "-m", "lerobot.scripts.train_world_model",
+            f"--dataset_path={resolved_hdf5}",
+            f"--batch_size={args.batch_size}",
+            f"--lr={args.lr}",
+            f"--num_steps={args.steps}",
+            f"--seed={args.seed}",
+            f"--output_dir={args.output_dir}",
+        ]
+        if args.config:
+            cmd.append(f"--config={args.config}")
+        if getattr(args, "remainder", None):
+            cmd.extend(a for a in args.remainder if a != "--")
+        return cmd
 
     if args.dry_run:
+        train_cmd = _build_train_cmd(hdf5_path)
         if not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
             print(
                 f"[wm_leworldmodel] Step 1 — convert dataset (via lerobot_world_model_bridge Python API):\n"
@@ -183,21 +185,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"[wm_leworldmodel] Conversion error: {exc}", file=sys.stderr)
         return 1
 
-    # Patch train_cmd with resolved hdf5_path
-    train_cmd = [
-        sys.executable, "-m", "lerobot.scripts.train_world_model",
-        f"--dataset_path={hdf5_path}",
-        f"--batch_size={args.batch_size}",
-        f"--lr={args.lr}",
-        f"--num_steps={args.steps}",
-        f"--seed={args.seed}",
-        f"--output_dir={args.output_dir}",
-    ]
-    if args.config:
-        train_cmd.append(f"--config={args.config}")
-    if getattr(args, "remainder", None):
-        extra = [a for a in args.remainder if a != "--"]
-        train_cmd.extend(extra)
+    train_cmd = _build_train_cmd(hdf5_path)
 
     # Step 2: run LeWorldModel training
     try:

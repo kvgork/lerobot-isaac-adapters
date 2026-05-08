@@ -3,7 +3,9 @@
 **Phase:** 2 (training adapter)
 **Role:** Single entrypoint for all training runs. Dispatches by `--target_arch` to policy
 (smolvla/act/diffusion) or world-model (dreamerv3/le_world_model) backends.
-**Status:** Dispatch router and metric emitter implemented; most backends are stubs.
+**Status:** All three backends wired with subprocess dispatch + metric extraction.
+Dry-run smoke passes for `smolvla` / `act` / `diffusion` / `dreamerv3` / `le_world_model`.
+Real training requires `lerobot-train` (policy) or `sheeprl` (DreamerV3) installed.
 
 ---
 
@@ -22,10 +24,14 @@ Three responsibilities:
 ## Public API
 
 ```python
-from lerobot_isaac_adapters import train           # module; call train.main()
 from lerobot_isaac_adapters import metric_extractor  # emit() + MetricEmitter
+from lerobot_isaac_adapters.train import main as train_main  # CLI entry
 from lerobot_isaac_adapters import isaac_data_recorder  # record_episodes()
 ```
+
+Note: `train` is NOT eagerly re-exported from the package `__init__.py`.
+This keeps `python -m lerobot_isaac_adapters.train` from triggering a
+`RuntimeWarning: <module> found in sys.modules` on every invocation.
 
 Console script: `lerobot-isaac-train` → `lerobot_isaac_adapters.train:main`
 
@@ -37,8 +43,8 @@ Console script: `lerobot-isaac-train` → `lerobot_isaac_adapters.train:main`
 |------|---------|
 | `src/lerobot_isaac_adapters/train.py` | argparse + dispatch router |
 | `src/lerobot_isaac_adapters/targets/policy_lerobot.py` | smolvla/act/diffusion — spawns `lerobot-train` subprocess |
-| `src/lerobot_isaac_adapters/targets/wm_dreamerv3.py` | DreamerV3 stub — `NotImplementedError` |
-| `src/lerobot_isaac_adapters/targets/wm_leworldmodel.py` | HF LeWorldModel stub — `NotImplementedError` |
+| `src/lerobot_isaac_adapters/targets/wm_dreamerv3.py` | DreamerV3 — `lerobot_world_model_bridge` Parquet→HDF5 (64×64) + `sheeprl exp=dreamer_v3` subprocess; parses `recon_loss=` |
+| `src/lerobot_isaac_adapters/targets/wm_leworldmodel.py` | HF LeWorldModel — bridge Parquet→HDF5 (96×96, win=16) + `python -m lerobot.scripts.train_world_model`; parses `pred_loss=` |
 | `src/lerobot_isaac_adapters/metric_extractor.py` | canonical stdout metric emitter |
 | `src/lerobot_isaac_adapters/isaac_data_recorder.py` | Isaac rollout -> LeRobotDataset Parquet |
 | `tests/test_train_argparse.py` | argparse smoke tests (all archs, dry_run) |

@@ -136,34 +136,24 @@ def run(args: argparse.Namespace) -> int:
     if args.dataset and args.dataset.endswith((".h5", ".hdf5")):
         hdf5_path = Path(args.dataset)
 
-    # Build conversion and training commands for dry_run / real run
-    conversion_cmd = [
-        sys.executable, "-c",
-        (
-            "import sys; sys.path.insert(0, '/home/koen/tools/claude_code'); "
-            "from skills.lerobot_world_model_bridge.operations import lerobot_to_worldmodel; "
-            f"lerobot_to_worldmodel('{args.dataset or ''}', '{hdf5_path}', "
-            "output_format='hdf5', image_size=(64,64), window_size=16, stride=8, normalize_actions=True)"
-        ),
-    ]
-
-    train_cmd = [
-        "python", "-m", "sheeprl.cli",
-        "exp=dreamer_v3",
-        "env=custom_hdf5",  # user must register this env; see sheeprl docs
-        f"env.dataset_path={hdf5_path}",
-        f"algo.batch_size={args.batch_size}",
-        f"algo.lr={args.lr}",
-        f"total_steps={args.steps}",
-        f"seed={args.seed}",
-        f"checkpoint.save_dir={args.output_dir}",
-    ]
-    if getattr(args, "remainder", None):
-        extra = [a for a in args.remainder if a != "--"]
-        train_cmd.extend(extra)
+    def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
+        cmd = [
+            "python", "-m", "sheeprl.cli",
+            "exp=dreamer_v3",
+            "env=custom_hdf5",  # user must register this env; see sheeprl docs
+            f"env.dataset_path={resolved_hdf5}",
+            f"algo.batch_size={args.batch_size}",
+            f"algo.lr={args.lr}",
+            f"total_steps={args.steps}",
+            f"seed={args.seed}",
+            f"checkpoint.save_dir={args.output_dir}",
+        ]
+        if getattr(args, "remainder", None):
+            cmd.extend(a for a in args.remainder if a != "--")
+        return cmd
 
     if args.dry_run:
-        # For dry_run, show both steps clearly
+        train_cmd = _build_train_cmd(hdf5_path)
         if not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
             print(
                 f"[wm_dreamerv3] Step 1 — convert dataset (via lerobot_world_model_bridge Python API):\n"
@@ -181,21 +171,7 @@ def run(args: argparse.Namespace) -> int:
         print(f"[wm_dreamerv3] Conversion error: {exc}", file=sys.stderr)
         return 1
 
-    # Patch train_cmd with resolved hdf5_path
-    train_cmd = [
-        "python", "-m", "sheeprl.cli",
-        "exp=dreamer_v3",
-        "env=custom_hdf5",
-        f"env.dataset_path={hdf5_path}",
-        f"algo.batch_size={args.batch_size}",
-        f"algo.lr={args.lr}",
-        f"total_steps={args.steps}",
-        f"seed={args.seed}",
-        f"checkpoint.save_dir={args.output_dir}",
-    ]
-    if getattr(args, "remainder", None):
-        extra = [a for a in args.remainder if a != "--"]
-        train_cmd.extend(extra)
+    train_cmd = _build_train_cmd(hdf5_path)
 
     # Step 2: run sheeprl
     try:
