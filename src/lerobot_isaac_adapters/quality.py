@@ -2,7 +2,7 @@
 quality.py — Quality filtering adapter for lerobot-isaac-adapters.
 
 Bridges to the lerobot_dataset_quality skill located at:
-  /home/koen/tools/claude_code/skills/lerobot_dataset_quality/
+  ${CLAUDE_CODE_ROOT}/skills/lerobot_dataset_quality/
 
 Path-bridging strategy
 -----------------------
@@ -10,7 +10,7 @@ The skill lives in the claude_code repo, which is NOT on the default PYTHONPATH
 when running inside the workspace.  We use a two-tier import approach:
 
   Tier 1 (preferred): direct Python import after sys.path injection.
-    - Inserts /home/koen/tools/claude_code into sys.path at call time (not import time).
+    - Inserts ${CLAUDE_CODE_ROOT} into sys.path at call time (not import time).
     - Works when running from the workspace pixi env on the same machine.
 
   Tier 2 (fallback): subprocess invocation using python3 -c "...".
@@ -42,13 +42,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 CLAUDE_CODE_ROOT: Path = Path(
-    os.environ.get("LEROBOT_CLAUDE_CODE_ROOT", "/home/koen/tools/claude_code")
+    os.path.expandvars(
+        os.environ.get("LEROBOT_CLAUDE_CODE_ROOT", "${CLAUDE_CODE_ROOT}")
+    )
 )
 """
 Absolute path to the claude_code repo containing the skills/ directory.
 
-Override by setting the LEROBOT_CLAUDE_CODE_ROOT environment variable:
-    export LEROBOT_CLAUDE_CODE_ROOT=/custom/path/claude_code
+Resolved at import time from (in order):
+1. ``LEROBOT_CLAUDE_CODE_ROOT`` environment variable (preferred)
+2. ``${CLAUDE_CODE_ROOT}`` shell expansion (fallback for the generic env var)
+
+If neither is set, the constant holds the literal placeholder ``${CLAUDE_CODE_ROOT}``
+and skill operations will fail at call time with a clear error.
+
+Bootstrap via ``scripts/setup_env.sh`` (which exports both vars) before use.
 """
 
 
@@ -220,7 +228,7 @@ def apply_quality_filter(
     Path-bridging note
     ------------------
     The skill is located at:
-        /home/koen/tools/claude_code/skills/lerobot_dataset_quality/
+        ${CLAUDE_CODE_ROOT}/skills/lerobot_dataset_quality/
     Override the root via: export LEROBOT_CLAUDE_CODE_ROOT=/path/to/claude_code
     """
     dataset_path = Path(dataset_path)

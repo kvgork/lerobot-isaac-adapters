@@ -97,7 +97,7 @@ def run(args):
 
 ## Source-of-Truth Paths (repo)
 
-- World model bridge skill: `/home/koen/tools/claude_code/skills/lerobot_world_model_bridge/`
+- World model bridge skill: `${CLAUDE_CODE_ROOT}/skills/lerobot_world_model_bridge/`
 - Training orchestrator: `~/.claude/agents/orchestrators/lerobot-training-orchestrator.md`
 - Autoresearch executor: `~/.claude/agents/workers/autoresearch-ml-executor-worker.md`
 - LeRobot specialist: `~/.claude/agents/lerobot-specialist.md`

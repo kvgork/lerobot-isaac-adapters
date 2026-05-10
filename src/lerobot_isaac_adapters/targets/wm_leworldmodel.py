@@ -87,8 +87,8 @@ def _convert_dataset(args: argparse.Namespace) -> Path:
     except ImportError:
         raise ImportError(
             "Cannot import lerobot_world_model_bridge skill. "
-            "Add /home/koen/tools/claude_code to PYTHONPATH:\n"
-            "  export PYTHONPATH=/home/koen/tools/claude_code:$PYTHONPATH"
+            "Add ${CLAUDE_CODE_ROOT} to PYTHONPATH:\n"
+            "  export PYTHONPATH=${CLAUDE_CODE_ROOT}:$PYTHONPATH"
         )
 
     print(
