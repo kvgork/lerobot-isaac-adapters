@@ -80,6 +80,9 @@ def run(args: argparse.Namespace) -> int:
           - ``seed``         (int)
           - ``dry_run``      (bool)
           - ``remainder``    (list[str]) — extra args forwarded to lerobot-train
+          - ``video_backend`` (str | None, optional) — overrides default ``pyav``
+            video backend.  Default avoids torchcodec ↔ system libavutil
+            version mismatches that break LeRobotDataset video loading.
 
     Returns
     -------
@@ -88,10 +91,16 @@ def run(args: argparse.Namespace) -> int:
     """
     policy_type = _lerobot_policy_type(args.target_arch)
 
+    # video_backend default: pyav (avoid torchcodec → libavutil version mismatch
+    # that breaks LeRobotDataset video loading on systems with newer ffmpeg).
+    # Caller can override via --remainder ['--dataset.video_backend=torchcodec'].
+    video_backend = getattr(args, "video_backend", None) or "pyav"
+
     cmd = [
         "lerobot-train",
         f"--policy.type={policy_type}",
         f"--dataset.repo_id={args.dataset or '<dataset>'}",
+        f"--dataset.video_backend={video_backend}",
         f"--training.batch_size={args.batch_size}",
         f"--training.num_steps={args.steps}",
         f"--training.lr={args.lr}",

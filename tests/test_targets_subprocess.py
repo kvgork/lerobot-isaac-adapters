@@ -173,6 +173,29 @@ class TestPolicyLerobotSubprocess:
         captured = capsys.readouterr()
         assert "lerobot-train" in captured.out
 
+    def test_video_backend_defaults_to_pyav(self) -> None:
+        """video_backend default must be pyav (avoid torchcodec libavutil mismatch)."""
+        mock_popen, _ = _mock_popen()
+        args = _make_args(target_arch="smolvla")
+
+        with patch("subprocess.Popen", mock_popen):
+            policy_lerobot.run(args)
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--dataset.video_backend=pyav" in cmd
+
+    def test_video_backend_override_via_namespace(self) -> None:
+        """Caller can override default by setting args.video_backend."""
+        mock_popen, _ = _mock_popen()
+        args = _make_args(target_arch="smolvla", video_backend="torchcodec")
+
+        with patch("subprocess.Popen", mock_popen):
+            policy_lerobot.run(args)
+
+        cmd = mock_popen.call_args[0][0]
+        assert "--dataset.video_backend=torchcodec" in cmd
+        assert "--dataset.video_backend=pyav" not in cmd
+
 
 # ---------------------------------------------------------------------------
 # wm_dreamerv3 — dry_run path (no conversion needed)
