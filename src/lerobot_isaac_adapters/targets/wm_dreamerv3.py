@@ -152,7 +152,9 @@ def run(args: argparse.Namespace) -> int:
             "sheeprl",
             "exp=dreamer_v3",
             "env=custom_hdf5",
-            f"env.dataset_path={resolved_hdf5}",
+            # Use Hydra `+` append syntax so the override works for env configs
+            # that do not predefine `dataset_path` (e.g. dummy/atari/dmc).
+            f"+env.dataset_path={resolved_hdf5}",
             f"algo.per_rank_batch_size={args.batch_size}",
             f"algo.world_model.optimizer.lr={args.lr}",
             f"algo.total_steps={args.steps}",
