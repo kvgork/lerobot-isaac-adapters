@@ -135,6 +135,10 @@ def run(args: argparse.Namespace) -> int:
         f"--optimizer.lr={args.lr}",
         f"--seed={args.seed}",
         f"--output_dir={args.output_dir}",
+        # Local-only by default. lerobot 0.5+ enforces a `policy.repo_id` when
+        # `policy.push_to_hub` is true (the default), even if the user has no
+        # HF account configured. Override via remainder to publish to the hub.
+        "--policy.push_to_hub=false",
     ]
     if dataset_root:
         cmd.append(f"--dataset.root={dataset_root}")
