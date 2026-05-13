@@ -77,9 +77,12 @@ class TestPolicyLerobotSubprocess:
         assert cmd[0] == "lerobot-train"
         assert "--policy.type=smolvla" in cmd
         assert f"--dataset.repo_id={args.dataset}" in cmd
-        assert f"--training.batch_size={args.batch_size}" in cmd
-        assert f"--training.num_steps={args.steps}" in cmd
-        assert f"--training.lr={args.lr}" in cmd
+        # lerobot >= 0.5 CLI: --batch_size / --steps / --optimizer.lr
+        # (was --training.batch_size / --training.num_steps / --training.lr in
+        # older releases).
+        assert f"--batch_size={args.batch_size}" in cmd
+        assert f"--steps={args.steps}" in cmd
+        assert f"--optimizer.lr={args.lr}" in cmd
         assert f"--seed={args.seed}" in cmd
         assert f"--output_dir={args.output_dir}" in cmd
 
@@ -126,7 +129,8 @@ class TestPolicyLerobotSubprocess:
             policy_lerobot.run(args)
 
         cmd = mock_popen.call_args[0][0]
-        assert "--config=/tmp/my_config.yaml" in cmd
+        # lerobot >= 0.5 CLI: --config_path (was --config in older releases).
+        assert "--config_path=/tmp/my_config.yaml" in cmd
 
     def test_nonzero_returncode_propagated(self) -> None:
         mock_popen, _ = _mock_popen(returncode=1)

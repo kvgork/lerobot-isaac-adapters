@@ -36,6 +36,29 @@ from lerobot_isaac_adapters.targets._subprocess import stream_training_subproces
 _PC_SUCCESS_RE = re.compile(r"eval/pc_success[=:\s]+([0-9.eE+\-]+)")
 
 
+def _split_dataset_arg(dataset: str | None) -> tuple[str, str | None]:
+    """Split ``--dataset`` into (repo_id, optional_local_root).
+
+    Heuristic: if the value looks like an on-disk LeRobotDataset directory
+    (contains a path separator AND exists on disk), treat it as a local
+    dataset — the lerobot CLI still wants a `--dataset.repo_id` so we
+    derive one from the trailing two path components (`org/name`).
+
+    Otherwise treat the value as a HuggingFace repo id verbatim.
+    """
+    import os
+
+    if not dataset:
+        return "<dataset>", None
+    if (os.sep in dataset or "/" in dataset) and os.path.isdir(dataset):
+        # Local dataset path. Derive a repo-id-like label from the last two
+        # path components so cache / logging keep working.
+        parts = dataset.rstrip(os.sep).split(os.sep)
+        repo_id = "/".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+        return repo_id, dataset
+    return dataset, None
+
+
 def _lerobot_policy_type(target_arch: str) -> str:
     """Map ``--target_arch`` to the LeRobot ``--policy.type`` string.
 
@@ -96,19 +119,27 @@ def run(args: argparse.Namespace) -> int:
     # Caller can override via --remainder ['--dataset.video_backend=torchcodec'].
     video_backend = getattr(args, "video_backend", None) or "pyav"
 
+    # CLI shape targets lerobot >= 0.5 (was --training.batch_size / --training.num_steps
+    # / --training.lr in older releases — those flags were removed). For local datasets
+    # the caller can also pass `--dataset.root=<path>` via remainder args; we infer it
+    # automatically when `args.dataset` looks like an on-disk path.
+    dataset_repo_id, dataset_root = _split_dataset_arg(args.dataset)
+
     cmd = [
         "lerobot-train",
         f"--policy.type={policy_type}",
-        f"--dataset.repo_id={args.dataset or '<dataset>'}",
+        f"--dataset.repo_id={dataset_repo_id}",
         f"--dataset.video_backend={video_backend}",
-        f"--training.batch_size={args.batch_size}",
-        f"--training.num_steps={args.steps}",
-        f"--training.lr={args.lr}",
+        f"--batch_size={args.batch_size}",
+        f"--steps={args.steps}",
+        f"--optimizer.lr={args.lr}",
         f"--seed={args.seed}",
         f"--output_dir={args.output_dir}",
     ]
+    if dataset_root:
+        cmd.append(f"--dataset.root={dataset_root}")
     if args.config:
-        cmd.insert(1, f"--config={args.config}")
+        cmd.insert(1, f"--config_path={args.config}")
 
     # Passthrough extra args (strip leading '--' separator if present)
     if getattr(args, "remainder", None):
