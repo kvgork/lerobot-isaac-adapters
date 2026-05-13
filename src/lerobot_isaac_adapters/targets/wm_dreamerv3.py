@@ -136,18 +136,28 @@ def run(args: argparse.Namespace) -> int:
         hdf5_path = Path(args.dataset)
 
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
+        # sheeprl entrypoint: `python -m sheeprl` (-> sheeprl/__main__.py).
+        # `python -m sheeprl.cli` runs the module body but does NOT dispatch the
+        # @hydra.main-decorated `run()` function, so the process exits silently
+        # without training. Use `-m sheeprl` instead.
+        #
+        # `env=custom_hdf5` is a SENTINEL config name — sheeprl ships no built-in
+        # custom_hdf5 env. The caller is expected to register an offline-replay
+        # env that consumes `env.dataset_path`. Until lerobot-isaac-adapters
+        # ships its own sheeprl env plugin, override the env via remainder args
+        # (e.g. `-- env=dmc` to validate the runtime).
         cmd = [
             "python",
             "-m",
-            "sheeprl.cli",
+            "sheeprl",
             "exp=dreamer_v3",
-            "env=custom_hdf5",  # user must register this env; see sheeprl docs
+            "env=custom_hdf5",
             f"env.dataset_path={resolved_hdf5}",
-            f"algo.batch_size={args.batch_size}",
-            f"algo.lr={args.lr}",
-            f"total_steps={args.steps}",
+            f"algo.per_rank_batch_size={args.batch_size}",
+            f"algo.world_model.optimizer.lr={args.lr}",
+            f"algo.total_steps={args.steps}",
             f"seed={args.seed}",
-            f"checkpoint.save_dir={args.output_dir}",
+            f"hydra.run.dir={args.output_dir}",
         ]
         if getattr(args, "remainder", None):
             cmd.extend(a for a in args.remainder if a != "--")

@@ -349,10 +349,12 @@ class TestWmDreamerv3Subprocess:
 
         assert rc == 0
         cmd = mock_popen.call_args[0][0]
-        # Verify sheeprl is invoked
-        assert any("sheeprl" in part for part in cmd), f"sheeprl not in cmd: {cmd}"
+        # Verify sheeprl is invoked via `python -m sheeprl` (not `sheeprl.cli`,
+        # which exits silently without dispatching the hydra-decorated run()).
+        assert "sheeprl" in cmd, f"sheeprl module not in cmd: {cmd}"
+        assert "sheeprl.cli" not in cmd, f"must use `-m sheeprl`, got cmd: {cmd}"
         assert "exp=dreamer_v3" in cmd
-        assert "total_steps=100" in cmd
+        assert "algo.total_steps=100" in cmd
 
     def test_sheeprl_nonzero_returncode_propagated(self, tmp_path) -> None:
         hdf5_path = tmp_path / "dreamerv3_data.hdf5"
