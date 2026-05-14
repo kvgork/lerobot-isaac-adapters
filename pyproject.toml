@@ -21,6 +21,7 @@ monorepo = ["lerobot-isaac-configs"]
 
 [project.scripts]
 lerobot-isaac-train = "lerobot_isaac_adapters.train:main"
+lerobot-isaac-deploy = "lerobot_isaac_adapters.deploy:main"
 
 [build-system]
 requires = ["hatchling"]
