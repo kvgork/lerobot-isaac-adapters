@@ -138,22 +138,25 @@ def run(args: argparse.Namespace) -> int:
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
         # sheeprl entrypoint: `python -m sheeprl` (-> sheeprl/__main__.py).
         # `python -m sheeprl.cli` runs the module body but does NOT dispatch the
-        # @hydra.main-decorated `run()` function, so the process exits silently
-        # without training. Use `-m sheeprl` instead.
+        # @hydra.main-decorated `run()` function. Use `-m sheeprl` instead.
         #
-        # `env=custom_hdf5` is a SENTINEL config name — sheeprl ships no built-in
-        # custom_hdf5 env. The caller is expected to register an offline-replay
-        # env that consumes `env.dataset_path`. Until lerobot-isaac-adapters
-        # ships its own sheeprl env plugin, override the env via remainder args
-        # (e.g. `-- env=dmc` to validate the runtime).
+        # `env=custom_hdf5` resolves against our bundled config dir
+        # `lerobot_isaac_adapters/sheeprl_plugin/configs/env/custom_hdf5.yaml`,
+        # which wraps `HDF5ReplayEnv` and feeds the bridge-produced HDF5
+        # to sheeprl's dreamer_v3 directly. Override via remainder if you
+        # have a different sheeprl env registered (`-- env=dmc`, etc.).
+        import lerobot_isaac_adapters.sheeprl_plugin as _plugin  # local import
+        plugin_configs = str(Path(_plugin.__file__).parent / "configs")
+
         cmd = [
-            "python",
+            sys.executable,
             "-m",
             "sheeprl",
+            f"--config-dir={plugin_configs}",
             "exp=dreamer_v3",
             "env=custom_hdf5",
-            # Use Hydra `+` append syntax so the override works for env configs
-            # that do not predefine `dataset_path` (e.g. dummy/atari/dmc).
+            # `+` append in case the caller overrides env=... to a built-in
+            # env config that does not predefine `dataset_path`.
             f"+env.dataset_path={resolved_hdf5}",
             f"algo.per_rank_batch_size={args.batch_size}",
             f"algo.world_model.optimizer.lr={args.lr}",

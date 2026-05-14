@@ -1,0 +1,17 @@
+defaults:
+  - default
+  - _self_
+
+# A "world-model" env: there is no real environment; the wrapper replays
+# pre-recorded LeRobotDataset frames from an HDF5 produced by the
+# lerobot_world_model_bridge skill. dreamer_v3 learns the world model from
+# this stream of observations.
+id: custom_hdf5
+dataset_path: ???      # required — path to the HDF5 file
+window_size: 16
+capture_video: False   # replay env has no rgb_array render mode by default
+
+wrapper:
+  _target_: lerobot_isaac_adapters.sheeprl_plugin.hdf5_env.get_hdf5_env
+  dataset_path: ${env.dataset_path}
+  window_size: ${env.window_size}
