@@ -151,6 +151,16 @@ def run(args: argparse.Namespace) -> int:
     if args.dataset and args.dataset.endswith((".h5", ".hdf5")):
         hdf5_path = Path(args.dataset)
 
+    # 2026-05-14: `lerobot 0.5.x` does NOT ship `lerobot.scripts.train_world_model`,
+    # so the legacy subprocess path always errored. We now default to the
+    # in-process `_lewm_minimal` trainer (a tiny CNN encoder + linear dynamics
+    # head consuming the bridge's `windows` HDF5 group). Set
+    # `LEROBOT_ISAAC_LEWM_BACKEND=hf` to force the legacy upstream-CLI path
+    # back for users who have a fork that exposes the script.
+    import os as _os
+
+    use_hf_cli = _os.environ.get("LEROBOT_ISAAC_LEWM_BACKEND", "").lower() == "hf"
+
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
         cmd = [
             sys.executable,
@@ -170,7 +180,6 @@ def run(args: argparse.Namespace) -> int:
         return cmd
 
     if args.dry_run:
-        train_cmd = _build_train_cmd(hdf5_path)
         if not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
             print(
                 f"[wm_leworldmodel] Step 1 — convert dataset (via lerobot_world_model_bridge Python API):\n"
@@ -178,7 +187,20 @@ def run(args: argparse.Namespace) -> int:
             )
         else:
             print(f"[wm_leworldmodel] Step 1 — pre-converted HDF5: {hdf5_path}")
-        print(f"[wm_leworldmodel] Step 2 — train:\n  {shlex.join(train_cmd)}")
+        if use_hf_cli:
+            train_cmd = _build_train_cmd(hdf5_path)
+            print(
+                f"[wm_leworldmodel] Step 2 — train (HF backend, opt-in):\n  {shlex.join(train_cmd)}"
+            )
+        else:
+            print(
+                "[wm_leworldmodel] Step 2 — train (default backend "
+                "`_lewm_minimal` in-process):\n"
+                f"  python -m lerobot_isaac_adapters.targets._lewm_minimal "
+                f"--dataset={hdf5_path} --output_dir={args.output_dir} "
+                f"--steps={args.steps} --batch_size={args.batch_size} "
+                f"--lr={args.lr} --seed={args.seed}"
+            )
         return 0
 
     # Step 1: convert dataset
@@ -188,16 +210,36 @@ def run(args: argparse.Namespace) -> int:
         print(f"[wm_leworldmodel] Conversion error: {exc}", file=sys.stderr)
         return 1
 
-    train_cmd = _build_train_cmd(hdf5_path)
+    # Step 2: train. Default = in-process `_lewm_minimal` (CNN encoder + linear
+    # dynamics head). Set LEROBOT_ISAAC_LEWM_BACKEND=hf to opt back into the
+    # upstream subprocess CLI (only works on lerobot forks that expose
+    # `lerobot.scripts.train_world_model`).
+    if use_hf_cli:
+        train_cmd = _build_train_cmd(hdf5_path)
+        return stream_training_subprocess(
+            train_cmd,
+            metric_re=_PRED_LOSS_RE,
+            metric_name="pred_loss",
+            label="wm_leworldmodel",
+            install_hint=(
+                "lerobot.scripts.train_world_model not available in lerobot 0.5.x; "
+                "unset LEROBOT_ISAAC_LEWM_BACKEND to use the in-process "
+                "`_lewm_minimal` backend instead."
+            ),
+        )
 
-    # Step 2: run LeWorldModel training
-    return stream_training_subprocess(
-        train_cmd,
-        metric_re=_PRED_LOSS_RE,
-        metric_name="pred_loss",
-        label="wm_leworldmodel",
-        install_hint=(
-            "lerobot.scripts.train_world_model not available; "
-            "install LeRobot with world-model support: pip install lerobot"
-        ),
+    # In-process backend. Build a synthetic argparse Namespace for the trainer
+    # and call it directly — no subprocess overhead and stdout is naturally
+    # captured by the autoresearch wrapper.
+    from lerobot_isaac_adapters.targets._lewm_minimal import train as _lewm_train
+
+    ns = argparse.Namespace(
+        dataset=str(hdf5_path),
+        output_dir=args.output_dir,
+        steps=args.steps,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        seed=args.seed,
+        log_every=50,
     )
+    return _lewm_train(ns)
