@@ -125,8 +125,23 @@ def run(args: argparse.Namespace) -> int:
     # automatically when `args.dataset` looks like an on-disk path.
     dataset_repo_id, dataset_root = _split_dataset_arg(args.dataset)
 
-    cmd = [
-        "lerobot-train",
+    # Entry: either `lerobot-train` (default) or our cached-dataset wrapper
+    # which monkey-patches `make_dataset` before dispatching to the same
+    # lerobot main. The wrapper trades ~5 min one-time decode for ~3-4x
+    # steps/s on PNG-heavy datasets (see plans/2026-05-15-dataloader-gpu-
+    # decode-plan.md, approach A).
+    if getattr(args, "cache_frames", False):
+        import sys
+
+        cmd = [
+            sys.executable,
+            "-m",
+            "lerobot_isaac_adapters.cli_train_cached",
+        ]
+    else:
+        cmd = ["lerobot-train"]
+
+    cmd += [
         f"--policy.type={policy_type}",
         f"--dataset.repo_id={dataset_repo_id}",
         f"--dataset.video_backend={video_backend}",
@@ -153,6 +168,15 @@ def run(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(shlex.join(cmd))
         return 0
+
+    # Forward cache-knob to the wrapper subprocess via env (cli_train_cached
+    # reads LEROBOT_ISAAC_CACHE_RAM_GB at make_dataset patch time).
+    if getattr(args, "cache_frames", False):
+        import os
+
+        os.environ["LEROBOT_ISAAC_CACHE_RAM_GB"] = str(
+            float(getattr(args, "cache_ram_gb", 8.0))
+        )
 
     return stream_training_subprocess(
         cmd,

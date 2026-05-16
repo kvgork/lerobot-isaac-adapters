@@ -125,6 +125,28 @@ def _build_parser() -> argparse.ArgumentParser:
             "Useful for verifying arguments before a long training run."
         ),
     )
+    parser.add_argument(
+        "--cache_frames",
+        action="store_true",
+        help=(
+            "Pre-decode every dataset row into RAM at train start, then serve "
+            "all subsequent steps from memory. Removes the PNG-decode "
+            "bottleneck on small datasets (~3-4x steps/s gain on PNG-heavy "
+            "LeRobotDataset). See plans/2026-05-15-dataloader-gpu-decode-plan.md "
+            "(approach A). Currently wired for policy archs only (smolvla, "
+            "act, diffusion). Ignored by world-model backends."
+        ),
+    )
+    parser.add_argument(
+        "--cache_ram_gb",
+        type=float,
+        default=8.0,
+        metavar="GB",
+        help=(
+            "Hard RAM ceiling for --cache_frames. The wrapper raises "
+            "MemoryError mid-warmup if exceeded. Default: %(default)s GB."
+        ),
+    )
     # Capture any extra args after '--' to forward to the backend
     parser.add_argument(
         "remainder",
@@ -154,7 +176,9 @@ def _dispatch(args: argparse.Namespace) -> int:
             f"steps={args.steps} "
             f"batch_size={args.batch_size} "
             f"lr={args.lr} "
-            f"seed={args.seed}"
+            f"seed={args.seed} "
+            f"cache_frames={args.cache_frames} "
+            f"cache_ram_gb={args.cache_ram_gb}"
         )
 
     arch = args.target_arch
