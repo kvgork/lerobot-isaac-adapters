@@ -147,6 +147,51 @@ def _build_parser() -> argparse.ArgumentParser:
             "MemoryError mid-warmup if exceeded. Default: %(default)s GB."
         ),
     )
+    # --- LoRA / PEFT flags (Phase 1.4) ----------------------------------
+    parser.add_argument(
+        "--use_lora",
+        action="store_true",
+        help=(
+            "Wrap the policy with PEFT LoRA adapters at policy-construction "
+            "time. Currently supported for --target_arch smolvla only. "
+            "Other archs ignore this flag with a warning."
+        ),
+    )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=8,
+        metavar="R",
+        help="LoRA rank r. Common range: 4-32. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--lora_alpha",
+        type=int,
+        default=16,
+        metavar="A",
+        help=(
+            "LoRA scaling factor alpha. Effective scale = alpha/r. "
+            "Default: %(default)s (= 2*default_rank)."
+        ),
+    )
+    parser.add_argument(
+        "--lora_dropout",
+        type=float,
+        default=0.0,
+        metavar="F",
+        help="Dropout on the LoRA path. Default: %(default)s.",
+    )
+    parser.add_argument(
+        "--lora_target_modules",
+        default="attn_qv",
+        metavar="SPEC",
+        help=(
+            "LoRA target modules. Either a preset "
+            "(attn_qv | attn_qkvo | expert_only) or a comma-separated list "
+            "of layer-name suffixes (e.g. 'q_proj,v_proj'). "
+            "Default: %(default)s."
+        ),
+    )
     # Capture any extra args after '--' to forward to the backend
     parser.add_argument(
         "remainder",
@@ -167,6 +212,15 @@ def _dispatch(args: argparse.Namespace) -> int:
     int
         Exit code (0 on success, including dry-run).
     """
+    # smolvla-only guard: warn and clear use_lora for unsupported archs.
+    if getattr(args, "use_lora", False) and args.target_arch != "smolvla":
+        print(
+            f"[lerobot-isaac-train] WARNING: LoRA is only wired for smolvla; "
+            f"ignoring --use_lora for target_arch={args.target_arch!r}.",
+            file=sys.stderr,
+        )
+        args.use_lora = False
+
     if args.dry_run:
         # Global dry_run summary — backends also handle their own dry_run output
         print(
@@ -178,7 +232,12 @@ def _dispatch(args: argparse.Namespace) -> int:
             f"lr={args.lr} "
             f"seed={args.seed} "
             f"cache_frames={args.cache_frames} "
-            f"cache_ram_gb={args.cache_ram_gb}"
+            f"cache_ram_gb={args.cache_ram_gb} "
+            f"use_lora={args.use_lora} "
+            f"lora_rank={args.lora_rank} "
+            f"lora_alpha={args.lora_alpha} "
+            f"lora_dropout={args.lora_dropout} "
+            f"lora_target_modules={args.lora_target_modules}"
         )
 
     arch = args.target_arch

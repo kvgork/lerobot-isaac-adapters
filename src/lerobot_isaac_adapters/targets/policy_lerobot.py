@@ -125,12 +125,13 @@ def run(args: argparse.Namespace) -> int:
     # automatically when `args.dataset` looks like an on-disk path.
     dataset_repo_id, dataset_root = _split_dataset_arg(args.dataset)
 
-    # Entry: either `lerobot-train` (default) or our cached-dataset wrapper
-    # which monkey-patches `make_dataset` before dispatching to the same
-    # lerobot main. The wrapper trades ~5 min one-time decode for ~3-4x
-    # steps/s on PNG-heavy datasets (see plans/2026-05-15-dataloader-gpu-
-    # decode-plan.md, approach A).
-    if getattr(args, "cache_frames", False):
+    # Decide whether to route through the in-process wrapper (cached or LoRA).
+    # The wrapper monkey-patches make_dataset (cache) and/or make_policy (LoRA)
+    # before dispatching to the same lerobot main.
+    use_lora = getattr(args, "use_lora", False)
+    needs_wrapper = bool(use_lora or getattr(args, "cache_frames", False))
+
+    if needs_wrapper:
         import sys
 
         cmd = [
@@ -167,6 +168,12 @@ def run(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         print(shlex.join(cmd))
+        if use_lora:
+            print(
+                f"[policy_lerobot] LoRA enabled: r={args.lora_rank} "
+                f"alpha={args.lora_alpha} dropout={args.lora_dropout} "
+                f"target_modules={args.lora_target_modules}"
+            )
         return 0
 
     # Forward cache-knob to the wrapper subprocess via env (cli_train_cached
@@ -177,6 +184,18 @@ def run(args: argparse.Namespace) -> int:
         os.environ["LEROBOT_ISAAC_CACHE_RAM_GB"] = str(
             float(getattr(args, "cache_ram_gb", 8.0))
         )
+
+    # Forward LoRA knobs to the wrapper subprocess via env vars.
+    # cli_train_cached reads these at policy-construction time (same pattern
+    # as LEROBOT_ISAAC_CACHE_RAM_GB).
+    if use_lora:
+        import os
+
+        os.environ["LEROBOT_ISAAC_LORA_RANK"] = str(args.lora_rank)
+        os.environ["LEROBOT_ISAAC_LORA_ALPHA"] = str(args.lora_alpha)
+        os.environ["LEROBOT_ISAAC_LORA_DROPOUT"] = str(args.lora_dropout)
+        os.environ["LEROBOT_ISAAC_LORA_TARGET_MODULES"] = args.lora_target_modules
+        os.environ["LEROBOT_ISAAC_USE_LORA"] = "1"
 
     return stream_training_subprocess(
         cmd,

@@ -307,3 +307,79 @@ class TestDryRun:
         assert f"--policy.type={arch}" in captured.out, (
             f"Expected '--policy.type={arch}' in dry-run output.\nstdout: {captured.out!r}"
         )
+
+
+class TestLoraFlags:
+    """LoRA / PEFT flag passthrough — Phase 1.4 contract."""
+
+    def test_use_lora_default_false(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.use_lora is False
+
+    def test_use_lora_flag_sets_true(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla", "--use_lora"])
+        assert args.use_lora is True
+
+    def test_lora_rank_default_is_8(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.lora_rank == 8
+
+    def test_lora_rank_parsed_as_int(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla", "--lora_rank", "16"])
+        assert args.lora_rank == 16
+
+    def test_lora_alpha_default_is_16(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.lora_alpha == 16
+
+    def test_lora_dropout_default_is_zero(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.lora_dropout == pytest.approx(0.0)
+
+    def test_lora_target_modules_default_attn_qv(self):
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.lora_target_modules == "attn_qv"
+
+    def test_lora_dry_run_prints_lora_config(self, capsys):
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "smolvla", "--dataset", "lerobot/pusht",
+                "--use_lora", "--lora_rank", "16", "--lora_alpha", "32",
+                "--lora_dropout", "0.05", "--lora_target_modules", "attn_qkvo",
+                "--dry_run",
+            ]
+        )
+        _dispatch(args)
+        captured = capsys.readouterr()
+        out = captured.out
+        assert ("LoRA enabled" in out) or ("use_lora=True" in out), (
+            f"Expected LoRA banner in dry-run output. stdout: {out!r}"
+        )
+        assert ("r=16" in out) or ("lora_rank=16" in out), (
+            f"Expected rank=16 in dry-run output. stdout: {out!r}"
+        )
+        assert "attn_qkvo" in out
+
+    @pytest.mark.parametrize("arch", ["act", "diffusion"])
+    def test_use_lora_on_non_smolvla_warns(self, arch, capsys):
+        """Phase 1.4 contract: --use_lora on non-smolvla warns, does not raise."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", arch, "--dataset", "lerobot/pusht",
+                "--use_lora", "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        captured = capsys.readouterr()
+        combined = (captured.out + captured.err).lower()
+        assert "lora" in combined and "smolvla" in combined
+        assert rc == 0

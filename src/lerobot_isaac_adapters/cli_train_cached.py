@@ -32,6 +32,10 @@ Environment knobs
   with that layout) or ``None`` (disable). On match, the wrapper writes
   the post-warmup cache to ``<dir>/<signature>.pt`` and reloads it on
   subsequent runs in ~20 s instead of re-warming.
+- ``LEROBOT_ISAAC_USE_LORA``: ``"1"`` to enable LoRA monkey-patch on
+  ``make_policy``. Requires ``LEROBOT_ISAAC_LORA_RANK``,
+  ``LEROBOT_ISAAC_LORA_ALPHA``, ``LEROBOT_ISAAC_LORA_DROPOUT``, and
+  ``LEROBOT_ISAAC_LORA_TARGET_MODULES`` to also be set.
 
 Usage
 -----
@@ -106,7 +110,7 @@ def _patched_make_dataset_factory(orig_make_dataset):
 
 
 def main() -> int:
-    """Patch make_dataset then dispatch to lerobot's training main."""
+    """Patch make_dataset (and optionally make_policy for LoRA) then dispatch to lerobot's training main."""
     try:
         # Import the lerobot training script. After this import, the
         # script's own `make_dataset` binding is the bound name we have
@@ -140,6 +144,58 @@ def main() -> int:
         _factory_module.make_dataset = _lerobot_train_module.make_dataset
     except ImportError:
         pass
+
+    # LoRA monkey-patch: when LEROBOT_ISAAC_USE_LORA=1, wrap the policy with
+    # PEFT LoRA adapters at policy-construction time (same in-process approach
+    # as the dataset cache patch above).
+    if os.environ.get("LEROBOT_ISAAC_USE_LORA") == "1":
+        import warnings
+
+        from lerobot_isaac_adapters.targets._lora import (
+            LoraSpec,
+            wrap_smolvla_policy,
+        )
+
+        # Locate make_policy in lerobot.scripts.train (preferred) or fall back
+        # to any make_policy attribute on lerobot.scripts.lerobot_train.
+        _train_module_for_policy = None
+        _orig_make_policy = None
+
+        try:
+            import lerobot.scripts.train as _lerobot_scripts_train
+
+            _orig_make_policy = getattr(_lerobot_scripts_train, "make_policy", None)
+            if _orig_make_policy is not None:
+                _train_module_for_policy = _lerobot_scripts_train
+        except ImportError:
+            pass
+
+        if _orig_make_policy is None:
+            # Fallback: search lerobot.scripts.lerobot_train for make_policy.
+            _orig_make_policy = getattr(_lerobot_train_module, "make_policy", None)
+            if _orig_make_policy is not None:
+                _train_module_for_policy = _lerobot_train_module
+            else:
+                warnings.warn(
+                    "[cli_train_cached] LEROBOT_ISAAC_USE_LORA=1 but could not "
+                    "find make_policy in lerobot.scripts.train or "
+                    "lerobot.scripts.lerobot_train. LoRA wrap will NOT be applied. "
+                    "Check that lerobot 0.5+ is installed.",
+                    stacklevel=1,
+                )
+
+        if _orig_make_policy is not None and _train_module_for_policy is not None:
+            def _patched_make_policy(*a, **kw):
+                policy = _orig_make_policy(*a, **kw)
+                spec = LoraSpec.from_args(
+                    rank=int(os.environ["LEROBOT_ISAAC_LORA_RANK"]),
+                    alpha=int(os.environ["LEROBOT_ISAAC_LORA_ALPHA"]),
+                    dropout=float(os.environ["LEROBOT_ISAAC_LORA_DROPOUT"]),
+                    target_modules_spec=os.environ["LEROBOT_ISAAC_LORA_TARGET_MODULES"],
+                )
+                return wrap_smolvla_policy(policy, spec)
+
+            setattr(_train_module_for_policy, "make_policy", _patched_make_policy)
 
     return _lerobot_train_module.main()
 
