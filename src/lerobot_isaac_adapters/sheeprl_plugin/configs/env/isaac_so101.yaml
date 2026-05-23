@@ -1,0 +1,32 @@
+defaults:
+  - default
+  - _self_
+
+# Real Isaac Lab SO-101 pick-place env. Actions actually affect state +
+# a shaped task reward is emitted — DreamerV3 actor head can learn task
+# control here, unlike the replay-based `custom_hdf5` env.
+#
+# Phase C of plans/2026-05-23-wm-isaac-env-plan.md.
+id: isaac_so101
+task: pickplace
+image_size: 64
+num_envs: 1
+rate_hz: 30.0
+max_episode_steps: 600
+headless: True
+device: cuda
+seed: 42
+dr_config: null          # optional path to a DR config yaml (see lerobot-isaac-env)
+capture_video: False
+
+wrapper:
+  _target_: lerobot_isaac_adapters.sheeprl_plugin.isaac_env.get_isaac_env
+  task:               ${env.task}
+  image_size:         ${env.image_size}
+  num_envs:           ${env.num_envs}
+  rate_hz:            ${env.rate_hz}
+  max_episode_steps:  ${env.max_episode_steps}
+  headless:           ${env.headless}
+  device:             ${env.device}
+  seed:               ${env.seed}
+  dr_config:          ${env.dr_config}
