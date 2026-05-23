@@ -266,24 +266,36 @@ class IsaacSO101Env(gym.Env):
         still has NotImplementedError for `wrist_camera_rgb`), return a
         zero RGB. Logs once.
         """
-        # raw_obs is dict[str, dict[str, Tensor]] for ManagerBasedRLEnv.
-        # The default group name is "policy".
+        # raw_obs shapes seen in the wild:
+        #   * dict[group(str)] -> dict[term(str)] -> Tensor    (older API)
+        #   * dict[group(str)] -> Tensor (concat of all terms) (newer API,
+        #     ObservationGroup with concatenate_terms=True default)
         if isinstance(raw_obs, dict):
             group = raw_obs.get("policy", raw_obs)
         else:
-            group = {}
+            group = raw_obs
 
         # ---- state (joint positions) ----
-        state_val = group.get(self.state_key)
-        if state_val is None:
-            # Older API may return a tensor directly, not a dict-of-terms.
-            state_val = group if hasattr(group, "shape") else None
+        if isinstance(group, dict):
+            state_val = group.get(self.state_key)
+        elif hasattr(group, "shape"):
+            # Flat concat tensor — joint_pos is the first 6 dims per
+            # lerobot_isaac_env.observations.PolicyObsGroupCfg ordering
+            # (joint_pos → joint_vel → last_action → object_pose).
+            state_val = group[..., :6] if group.shape[-1] >= 6 else group
+        else:
+            state_val = None
         state_np = self._tensor_to_np(state_val, default_shape=(6,), default_dtype=np.float32)
-        # Single-env squeeze.
         if state_np.ndim == 2 and state_np.shape[0] == self.num_envs:
             state_np = state_np[0]
+        if state_np.size >= 6:
+            state_np = state_np.reshape(-1)[:6]
+        else:
+            state_np = np.zeros(6, dtype=np.float32)
 
         # ---- rgb (camera) ----
+        # Concat-tensor group has no camera key extraction path → falls
+        # back to zero RGB until cameras are wired in lerobot-isaac-env.
         rgb_val = group.get(self.camera_key) if isinstance(group, dict) else None
         try:
             rgb_np = self._tensor_to_np(
