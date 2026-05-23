@@ -122,6 +122,7 @@ class IsaacSO101Env(gym.Env):
         self._rng = np.random.default_rng(seed)
         self._t = 0
         self._isaac_env: Any = None  # populated by _boot()
+        self._app: Any = None        # SimulationApp handle
         self._booted = False
         self._has_camera_term = False  # set by _boot() probe
 
@@ -181,9 +182,36 @@ class IsaacSO101Env(gym.Env):
     # ------------------------------------------------------------------ #
 
     def _boot(self) -> None:
-        """Spin up Isaac Lab + the SO-101 pick-place env. Idempotent."""
+        """Spin up Isaac Lab + the SO-101 pick-place env. Idempotent.
+
+        AppLauncher MUST run BEFORE any `isaaclab.*` import — the
+        managers import `omni.kit.app` at module-load time, which only
+        exists once SimulationApp is alive. Failing to do this gives
+        `ModuleNotFoundError: omni.kit.app`. Same recipe as Isaac Lab's
+        own example scripts.
+        """
         if self._booted:
             return
+
+        # 1. Boot SimulationApp via AppLauncher FIRST.
+        try:
+            from isaaclab.app import AppLauncher  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "Isaac Lab (isaaclab.app.AppLauncher) is required. "
+                "Run `pixi install -e sim && pixi run install-isaac-lab` "
+                f"in the training workspace. ({exc})"
+            ) from exc
+        launcher = AppLauncher(
+            headless=self.headless, enable_cameras=True
+        )
+        self._app = launcher.app
+        # Give the app two update ticks to finish boot.
+        for _ in range(2):
+            self._app.update()
+
+        # 2. NOW it's safe to import lerobot_isaac_env (which transitively
+        #    imports isaaclab.envs / managers).
         try:
             from lerobot_isaac_env import make_env  # type: ignore[import]
         except ImportError as exc:
