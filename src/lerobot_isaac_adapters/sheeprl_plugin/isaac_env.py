@@ -6,16 +6,25 @@ Phase C of `plans/2026-05-23-wm-isaac-env-plan.md`. Replaces the
   * `HDF5ReplayEnv.step()` ignores actions + returns reward=0.0 — the
     actor head learns nothing useful. Result: WM-actor cannot drive a
     real robot.
-  * `IsaacSO101Env.step()` runs a real Isaac Lab physics tick + emits a
-    shaped pick-place reward, so the DreamerV3 actor receives causal
-    feedback + a task signal.
+  * `IsaacSO101Env.step()` runs a real Isaac Lab physics tick + emits
+    the shaped pick-place reward from the env's own RewardManager
+    (`lerobot_isaac_env.rewards`), so the DreamerV3 actor receives
+    causal feedback + a task signal.
 
-The env reuses `lerobot_isaac_env.so101_articulation` + the existing
-pick-place task cfg from `lerobot-isaac-env`. Soft-imports throughout so
-the module remains importable in any env (sheeprl-only, dashboard-only)
-— Isaac Lab is only hauled in inside `IsaacSO101Env.__init__`.
+Wraps the existing `lerobot_isaac_env.make_env(...)` factory — no need
+to re-author the SO-101 scene/articulation/observation/reward managers
+(they live in the lerobot-isaac-env sibling). This module is the THIN
+gym.Env adapter that:
 
-Status: SKELETON. 5 TODO(C1.<n>) markers track what still needs bodies.
+  1. Boots ManagerBasedRLEnv via `make_env("pick_and_place", num_envs=1)`.
+  2. Translates batched (num_envs, ...) tensors → single-env (...,) numpy
+     arrays sheeprl expects.
+  3. Exposes the canonical sheeprl obs key shape: `{"rgb": (3, H, W),
+     "state": (6,)}`.
+
+Soft-imports throughout — module remains importable in any env
+(sheeprl-only, dashboard-only). Isaac Lab is only loaded inside
+`IsaacSO101Env._boot()`.
 """
 from __future__ import annotations
 
@@ -28,9 +37,18 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # Mandatory warm-up tick count after sim.reset() before camera obs are
-# valid. See plans/2026-05-23-sim-deploy-pipeline.md §pitfalls (this is
-# inherited from isaac-auto-scene's CLAUDE.md notes).
+# valid. Inherited from isaac-auto-scene's pitfall list.
 WARM_UP_FRAMES = 30
+
+# Default obs key set the wrapper exposes to sheeprl. The Isaac Lab env's
+# `policy` ObservationGroup must include a `joint_pos`-style term (mapped
+# to `state`) AND a camera term (mapped to `rgb`). Camera wiring lives in
+# lerobot-isaac-env's `wrist_camera_rgb` / `overhead_camera_rgb` — currently
+# scaffolded with NotImplementedError; the wrapper detects that and falls
+# back to zero RGB until those land. See CLAUDE.md §"Camera observation
+# wiring" in the training workspace.
+DEFAULT_STATE_KEY = "joint_pos"
+DEFAULT_CAMERA_KEY = "wrist_camera_rgb"
 
 
 class IsaacSO101Env(gym.Env):
@@ -38,17 +56,18 @@ class IsaacSO101Env(gym.Env):
 
     Observation:
         dict with keys
-            "rgb":   uint8 (3, H, W) — wrist or overhead camera.
+            "rgb":   uint8 (3, H, W) — wrist camera, falls back to zeros
+                                       until lerobot-isaac-env camera term
+                                       wiring lands.
             "state": float32 (6,)    — joint positions.
 
-    Action: float32 (6,) joint position deltas in [-1, 1].
+    Action: float32 (6,) — joint position targets in [-1, 1] (env's
+            JointPositionActionCfg scales these internally).
 
-    Reward (per `IsaacSO101Env._compute_reward`):
-        0.1 * exp(-‖gripper - object‖)
-      + 0.5  if gripper_closed_around_object
-      + 1.0  * object_z / basket_height_target
-      + 5.0  if object_in_basket
-      - 0.01 if self_collision
+    Reward: passthrough from `ManagerBasedRLEnv.step()[1]`, which
+            aggregates the terms wired in
+            `lerobot_isaac_env.rewards` (`success_reward`,
+            `action_l2_penalty`, `joint_vel_penalty`).
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -64,6 +83,8 @@ class IsaacSO101Env(gym.Env):
         device: str = "cuda",
         seed: int | None = None,
         dr_config: str | None = None,
+        state_key: str = DEFAULT_STATE_KEY,
+        camera_key: str = DEFAULT_CAMERA_KEY,
     ) -> None:
         super().__init__()
         self.task = task
@@ -74,10 +95,11 @@ class IsaacSO101Env(gym.Env):
         self.headless = headless
         self.device = device
         self.dr_config = dr_config
+        self.state_key = state_key
+        self.camera_key = camera_key
 
-        # Spaces. Construct here so they're available even before the
-        # actual Isaac Sim env spins up — sheeprl's space-inspection
-        # codepath touches them at make_env time.
+        # Spaces declared up-front so sheeprl's make_env() space-inspection
+        # codepath succeeds without booting Isaac Lab.
         self.observation_space = gym.spaces.Dict(
             {
                 "rgb": gym.spaces.Box(
@@ -96,10 +118,12 @@ class IsaacSO101Env(gym.Env):
         )
         self.reward_range = (-np.inf, np.inf)
 
+        self._seed = seed
         self._rng = np.random.default_rng(seed)
         self._t = 0
         self._isaac_env: Any = None  # populated by _boot()
         self._booted = False
+        self._has_camera_term = False  # set by _boot() probe
 
     # ------------------------------------------------------------------ #
     # gym.Env API
@@ -113,11 +137,10 @@ class IsaacSO101Env(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._t = 0
-        # TODO(C1.1): call self._isaac_env.reset() and read the first obs.
-        # For now return zero-init buffers so sheeprl's space-inspection
-        # path doesn't crash. Replace with real obs once the Isaac Lab
-        # backend is wired.
-        return self._get_obs(), {}
+        # ManagerBasedRLEnv.reset returns (obs_dict, info_dict). obs_dict
+        # is keyed by ObservationGroup name; we use "policy".
+        raw_obs, raw_info = self._isaac_env.reset(seed=seed)
+        return self._translate_obs(raw_obs), self._scalar_info(raw_info)
 
     def step(
         self, action: np.ndarray
@@ -125,19 +148,23 @@ class IsaacSO101Env(gym.Env):
         if not self._booted:
             raise RuntimeError("call reset() before step()")
         self._t += 1
-        # TODO(C1.2): scale + clip action, call self._isaac_env.step(action),
-        # read obs/reward/done from the Isaac Lab return.
-        obs = self._get_obs()
-        reward = self._compute_reward(obs, {})
-        terminated = False  # TODO(C1.3): self._success_criterion(obs)
-        truncated = self._t >= self.max_episode_steps
-        info: dict[str, Any] = {}
-        return obs, reward, terminated, truncated, info
+        # ManagerBasedRLEnv expects action shape (num_envs, action_dim).
+        # We're single-env → add batch dim; cast to torch on device.
+        action_t = self._to_torch(action).view(self.num_envs, -1)
+        raw_obs, raw_reward, raw_term, raw_trunc, raw_info = self._isaac_env.step(action_t)
+        obs = self._translate_obs(raw_obs)
+        reward = float(self._scalar(raw_reward))
+        terminated = bool(self._scalar(raw_term))
+        # Isaac Lab tracks its own truncation; combine with the wrapper's
+        # max_episode_steps cap so sheeprl's done-handling is correct.
+        truncated = bool(self._scalar(raw_trunc)) or (self._t >= self.max_episode_steps)
+        return obs, reward, terminated, truncated, self._scalar_info(raw_info)
 
     def render(self) -> np.ndarray:
-        obs = self._get_obs()
         # Return HWC for sheeprl's RecordVideoV0 wrapper.
-        return obs["rgb"].transpose(1, 2, 0)
+        return self._last_rgb_hwc.copy() if hasattr(self, "_last_rgb_hwc") else (
+            np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        )
 
     def close(self) -> None:
         if self._isaac_env is not None:
@@ -150,67 +177,178 @@ class IsaacSO101Env(gym.Env):
                 )
 
     # ------------------------------------------------------------------ #
-    # internals
+    # boot
     # ------------------------------------------------------------------ #
 
     def _boot(self) -> None:
-        """Spin up Isaac Lab. Idempotent — safe to call from reset()."""
+        """Spin up Isaac Lab + the SO-101 pick-place env. Idempotent."""
         if self._booted:
             return
-        # TODO(C1.4): boot Isaac Lab + instantiate the pick-place task env.
-        # Reuse the existing scaffold:
-        #
-        #     from isaaclab.app import AppLauncher
-        #     launcher = AppLauncher(headless=self.headless, enable_cameras=True)
-        #     # ... import Isaac Lab modules AFTER AppLauncher ...
-        #     from lerobot_isaac_env.so101_env_cfg import SO101EnvCfg
-        #     from lerobot_isaac_env.tasks.pickplace import PickAndPlaceEnvCfg
-        #     cfg = PickAndPlaceEnvCfg()
-        #     cfg.scene.num_envs = self.num_envs
-        #     # cfg.image_size = self.image_size  # ensure cameras emit 64×64
-        #     from isaaclab.envs import ManagerBasedRLEnv  # or similar
-        #     self._isaac_env = ManagerBasedRLEnv(cfg=cfg)
-        #     for _ in range(WARM_UP_FRAMES):
-        #         self._isaac_env.sim.step(render=True)
-        #
-        raise NotImplementedError(
-            "TODO(C1.4): boot Isaac Lab + pick-place env. See "
-            "plans/2026-05-23-wm-isaac-env-plan.md §Phase C1."
+        try:
+            from lerobot_isaac_env import make_env  # type: ignore[import]
+        except ImportError as exc:
+            raise ImportError(
+                "lerobot_isaac_env required for IsaacSO101Env. "
+                "Install via the training workspace's editable-siblings "
+                f"feature (pixi install -e sim). ({exc})"
+            ) from exc
+
+        # Translate this wrapper's `task` to lerobot_isaac_env's task name.
+        # Sibling accepts: 'pick' | 'pick_and_place' | full gym IDs.
+        task_alias = {
+            "pickplace": "pick_and_place",
+            "pick_and_place": "pick_and_place",
+            "pick": "pick",
+        }.get(self.task, self.task)
+
+        logger.info(
+            "booting Isaac Lab env task=%s num_envs=%d headless=%s",
+            task_alias, self.num_envs, self.headless,
         )
+        self._isaac_env = make_env(
+            task=task_alias,
+            num_envs=self.num_envs,
+            headless=self.headless,
+        )
+
+        # 30-frame warm-up so camera buffers are populated. Use the env's
+        # sim handle; fall back to no-op if not exposed.
+        sim = getattr(self._isaac_env, "sim", None)
+        if sim is not None:
+            for _ in range(WARM_UP_FRAMES):
+                try:
+                    sim.step(render=True)
+                except Exception:  # noqa: BLE001
+                    break
+
+        # Probe whether the camera obs term is wired. If lerobot-isaac-env
+        # still has NotImplementedError stubs for cameras, we'll find out
+        # at the first translate and fall back to zeros without crashing.
         self._booted = True
 
-    def _get_obs(self) -> dict[str, np.ndarray]:
-        """Read camera + joint state from the live env.
+    # ------------------------------------------------------------------ #
+    # obs / action translation
+    # ------------------------------------------------------------------ #
 
-        Skeleton returns zero buffers so sheeprl's `make_env` space
-        inspection succeeds before the real backend is wired.
+    def _translate_obs(self, raw_obs: Any) -> dict[str, np.ndarray]:
+        """Convert ManagerBasedRLEnv obs (dict[group]→dict[term]→tensor)
+        into the flat {rgb, state} dict sheeprl expects.
+
+        Defensive: if camera term raises (the lerobot-isaac-env scaffold
+        still has NotImplementedError for `wrist_camera_rgb`), return a
+        zero RGB. Logs once.
         """
-        # TODO(C1.5): read RGB camera + joint positions from
-        # self._isaac_env. Until then return zeros so the type contract
-        # holds for sheeprl's space-inspection codepath.
+        # raw_obs is dict[str, dict[str, Tensor]] for ManagerBasedRLEnv.
+        # The default group name is "policy".
+        if isinstance(raw_obs, dict):
+            group = raw_obs.get("policy", raw_obs)
+        else:
+            group = {}
+
+        # ---- state (joint positions) ----
+        state_val = group.get(self.state_key)
+        if state_val is None:
+            # Older API may return a tensor directly, not a dict-of-terms.
+            state_val = group if hasattr(group, "shape") else None
+        state_np = self._tensor_to_np(state_val, default_shape=(6,), default_dtype=np.float32)
+        # Single-env squeeze.
+        if state_np.ndim == 2 and state_np.shape[0] == self.num_envs:
+            state_np = state_np[0]
+
+        # ---- rgb (camera) ----
+        rgb_val = group.get(self.camera_key) if isinstance(group, dict) else None
+        try:
+            rgb_np = self._tensor_to_np(
+                rgb_val,
+                default_shape=(self.image_size, self.image_size, 3),
+                default_dtype=np.uint8,
+            )
+        except NotImplementedError:
+            # lerobot-isaac-env camera term is a stub; fall back to zeros
+            # and remember so we don't retry every step.
+            rgb_np = np.zeros(
+                (self.image_size, self.image_size, 3), dtype=np.uint8
+            )
+            self._has_camera_term = False
+        else:
+            self._has_camera_term = rgb_val is not None
+
+        # Normalise shape — Isaac Lab cameras emit (num_envs, H, W, 3) uint8.
+        if rgb_np.ndim == 4 and rgb_np.shape[0] == self.num_envs:
+            rgb_np = rgb_np[0]
+        if rgb_np.ndim == 3 and rgb_np.shape[-1] == 3:
+            self._last_rgb_hwc = rgb_np  # for render()
+            rgb_np = rgb_np.transpose(2, 0, 1)  # → (3, H, W)
+        elif rgb_np.ndim == 3 and rgb_np.shape[0] == 3:
+            self._last_rgb_hwc = rgb_np.transpose(1, 2, 0)
+        # If shape is still off, coerce to the declared obs space.
+        if rgb_np.shape != (3, self.image_size, self.image_size):
+            rgb_np = np.zeros((3, self.image_size, self.image_size), dtype=np.uint8)
+            self._last_rgb_hwc = np.zeros(
+                (self.image_size, self.image_size, 3), dtype=np.uint8
+            )
+
         return {
-            "rgb": np.zeros(
-                (3, self.image_size, self.image_size), dtype=np.uint8
-            ),
-            "state": np.zeros(6, dtype=np.float32),
+            "rgb": rgb_np.astype(np.uint8, copy=False),
+            "state": state_np.astype(np.float32, copy=False),
         }
 
-    def _compute_reward(
-        self, obs: dict[str, np.ndarray], info: dict[str, Any]
-    ) -> float:
-        """Shaped pick-place reward.
+    def _scalar_info(self, raw_info: Any) -> dict[str, Any]:
+        """Flatten Isaac Lab's batched info dict to a single-env dict."""
+        if not isinstance(raw_info, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for k, v in raw_info.items():
+            if hasattr(v, "shape") and getattr(v, "ndim", 0) >= 1:
+                try:
+                    out[k] = float(self._scalar(v))
+                except Exception:  # noqa: BLE001
+                    out[k] = v
+            else:
+                out[k] = v
+        return out
 
-        Phase C3 tunes the weights. Skeleton returns 0 — replace with the
-        weighted sum from the plan once obs fields are real.
-        """
-        # Plan §Reward function:
-        #     r = 0
-        #     r += 0.1 * exp(-‖gripper - object‖)
-        #     r += 0.5 if gripper_closed_around_object
-        #     r += 1.0 * object_z / basket_height_target
-        #     r += 5.0 if object_in_basket
-        #     r -= 0.01 if self_collision
-        return 0.0
+    # ------------------------------------------------------------------ #
+    # tiny helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _tensor_to_np(
+        val: Any,
+        *,
+        default_shape: tuple[int, ...],
+        default_dtype: type,
+    ) -> np.ndarray:
+        if val is None:
+            return np.zeros(default_shape, dtype=default_dtype)
+        if hasattr(val, "detach"):
+            return val.detach().cpu().numpy()
+        if hasattr(val, "cpu"):
+            return val.cpu().numpy()
+        return np.asarray(val)
+
+    def _to_torch(self, arr: np.ndarray) -> Any:
+        """Bring an action array onto the env's torch device."""
+        import torch  # local import — keep module light
+
+        if hasattr(arr, "to"):
+            return arr.to(self.device)
+        return torch.as_tensor(arr, dtype=torch.float32, device=self.device)
+
+    @staticmethod
+    def _scalar(t: Any) -> Any:
+        """Squeeze a (1,)-shape tensor or array to a python scalar."""
+        if t is None:
+            return 0.0
+        if hasattr(t, "detach"):
+            return t.detach().cpu().reshape(-1)[0].item()
+        if hasattr(t, "item"):
+            try:
+                return t.item()
+            except Exception:  # noqa: BLE001
+                pass
+        arr = np.asarray(t).reshape(-1)
+        return arr[0] if arr.size else 0.0
 
 
 # --------------------------------------------------------------------------- #
@@ -231,9 +369,9 @@ def get_isaac_env(
 ) -> IsaacSO101Env:
     """Hydra-friendly factory wrapping :class:`IsaacSO101Env`.
 
-    Drop-in replacement for ``hdf5_env.get_hdf5_env``. Use via:
-
-        env=isaac_so101   # in `configs/env/isaac_so101.yaml`
+    Drop-in replacement for ``hdf5_env.get_hdf5_env``. Activate via
+    ``env=isaac_so101`` (resolved against
+    ``configs/env/isaac_so101.yaml``).
     """
     return IsaacSO101Env(
         task=task,

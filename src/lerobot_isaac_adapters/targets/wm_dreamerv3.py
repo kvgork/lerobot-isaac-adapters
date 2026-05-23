@@ -131,6 +131,23 @@ def run(args: argparse.Namespace) -> int:
     register ``env=custom_hdf5`` before invoking this target.  See the
     ``sheeprl`` documentation for custom env registration.
     """
+    # Two env paths:
+    #   * env=custom_hdf5  → replay env, needs an HDF5 bridge step first.
+    #   * env=isaac_so101  → real Isaac Lab env, NO bridge needed (the env
+    #                       is live — actions affect physics, reward is
+    #                       emitted by the env's RewardManager).
+    # The caller picks via `--env <name>` (passed through the wrapper's
+    # remainder OR set explicitly on args.env). Default = custom_hdf5 for
+    # backwards compat with the existing autoresearch sweep.
+    env_name = getattr(args, "env", None) or "custom_hdf5"
+    if "--env" in (getattr(args, "remainder", []) or []):
+        rem = args.remainder
+        for i, tok in enumerate(rem):
+            if tok == "--env" and i + 1 < len(rem):
+                env_name = rem[i + 1]
+                break
+
+    use_isaac_env = env_name in ("isaac_so101", "isaac")
     hdf5_path = Path(args.output_dir) / "dreamerv3_data.hdf5"
     if args.dataset and args.dataset.endswith((".h5", ".hdf5")):
         hdf5_path = Path(args.dataset)
@@ -154,10 +171,12 @@ def run(args: argparse.Namespace) -> int:
             "sheeprl",
             f"--config-dir={plugin_configs}",
             "exp=dreamer_v3",
-            "env=custom_hdf5",
-            # `+` append in case the caller overrides env=... to a built-in
-            # env config that does not predefine `dataset_path`.
-            f"+env.dataset_path={resolved_hdf5}",
+            f"env={env_name}",
+        ]
+        if not use_isaac_env:
+            # HDF5 replay env needs the dataset path injected.
+            cmd.append(f"+env.dataset_path={resolved_hdf5}")
+        cmd += [
             f"algo.per_rank_batch_size={args.batch_size}",
             f"algo.world_model.optimizer.lr={args.lr}",
             f"algo.total_steps={args.steps}",
@@ -165,12 +184,29 @@ def run(args: argparse.Namespace) -> int:
             f"hydra.run.dir={args.output_dir}",
         ]
         if getattr(args, "remainder", None):
-            cmd.extend(a for a in args.remainder if a != "--")
+            # Strip the synthetic `--env <name>` tokens we consumed above
+            # so they don't reach sheeprl as garbage.
+            skip = 0
+            for tok in args.remainder:
+                if skip:
+                    skip -= 1
+                    continue
+                if tok == "--":
+                    continue
+                if tok == "--env":
+                    skip = 1
+                    continue
+                cmd.append(tok)
         return cmd
 
     if args.dry_run:
         train_cmd = _build_train_cmd(hdf5_path)
-        if not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
+        if use_isaac_env:
+            print(
+                f"[wm_dreamerv3] env={env_name} (Isaac Lab) — bridge step skipped, "
+                f"actor will learn against live physics + RewardManager."
+            )
+        elif not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
             print(
                 f"[wm_dreamerv3] Step 1 — convert dataset (via lerobot_world_model_bridge Python API):\n"
                 f"  dataset={args.dataset!r} -> {hdf5_path} (64x64 HDF5)"
@@ -180,12 +216,17 @@ def run(args: argparse.Namespace) -> int:
         print(f"[wm_dreamerv3] Step 2 — train:\n  {shlex.join(train_cmd)}")
         return 0
 
-    # Step 1: convert dataset
-    try:
-        hdf5_path = _convert_dataset(args)
-    except (ImportError, RuntimeError) as exc:
-        print(f"[wm_dreamerv3] Conversion error: {exc}", file=sys.stderr)
-        return 1
+    # Step 1: convert dataset (skip when running against a live env).
+    if not use_isaac_env:
+        try:
+            hdf5_path = _convert_dataset(args)
+        except (ImportError, RuntimeError) as exc:
+            print(f"[wm_dreamerv3] Conversion error: {exc}", file=sys.stderr)
+            return 1
+    else:
+        print(
+            f"[wm_dreamerv3] env={env_name} — skipping HDF5 bridge step."
+        )
 
     train_cmd = _build_train_cmd(hdf5_path)
 
