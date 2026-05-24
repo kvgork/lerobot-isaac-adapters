@@ -40,6 +40,14 @@ logger = logging.getLogger(__name__)
 # valid. Inherited from isaac-auto-scene's pitfall list.
 WARM_UP_FRAMES = 30
 
+# Module-level singleton: the underlying ManagerBasedRLEnv. Isaac Lab's
+# SimulationContext is a process-wide singleton, so multiple
+# IsaacSO101Env instances (e.g. sheeprl's train + test envs) MUST share
+# one backing env. Without this, the second instance's _boot() tries to
+# create a second SimulationContext and gets
+# `RuntimeError: Simulation context already exists`.
+_GLOBAL_BACKING_ISAAC_ENV: Any = None
+
 # Default obs key set the wrapper exposes to sheeprl. The Isaac Lab env's
 # `policy` ObservationGroup must include a `joint_pos`-style term (mapped
 # to `state`) AND a camera term (mapped to `rgb`). Camera wiring lives in
@@ -193,22 +201,35 @@ class IsaacSO101Env(gym.Env):
         if self._booted:
             return
 
-        # 1. Boot SimulationApp via AppLauncher FIRST.
+        # 1. Boot SimulationApp via AppLauncher FIRST — unless the caller
+        #    already booted it (e.g. scripts/_wm_isaac_entry.py does this
+        #    to claim libgobject before sheeprl imports). AppLauncher is
+        #    NOT a singleton — calling it twice hangs waiting for kit
+        #    extension reload. Probe `omni.kit.app` for an existing app.
+        existing_app = None
         try:
-            from isaaclab.app import AppLauncher  # type: ignore[import]
-        except ImportError as exc:
-            raise ImportError(
-                "Isaac Lab (isaaclab.app.AppLauncher) is required. "
-                "Run `pixi install -e sim && pixi run install-isaac-lab` "
-                f"in the training workspace. ({exc})"
-            ) from exc
-        launcher = AppLauncher(
-            headless=self.headless, enable_cameras=True
-        )
-        self._app = launcher.app
-        # Give the app two update ticks to finish boot.
-        for _ in range(2):
-            self._app.update()
+            import omni.kit.app as _kit_app  # type: ignore[import]
+            existing_app = _kit_app.get_app()
+        except Exception:  # noqa: BLE001
+            existing_app = None
+        if existing_app is not None and getattr(existing_app, "is_running", lambda: False)():
+            logger.info("SimulationApp already alive — skipping AppLauncher")
+            self._app = existing_app
+        else:
+            try:
+                from isaaclab.app import AppLauncher  # type: ignore[import]
+            except ImportError as exc:
+                raise ImportError(
+                    "Isaac Lab (isaaclab.app.AppLauncher) is required. "
+                    "Run `pixi install -e sim && pixi run install-isaac-lab` "
+                    f"in the training workspace. ({exc})"
+                ) from exc
+            launcher = AppLauncher(
+                headless=self.headless, enable_cameras=True
+            )
+            self._app = launcher.app
+            for _ in range(2):
+                self._app.update()
 
         # 2. NOW it's safe to import lerobot_isaac_env (which transitively
         #    imports isaaclab.envs / managers).
@@ -229,15 +250,27 @@ class IsaacSO101Env(gym.Env):
             "pick": "pick",
         }.get(self.task, self.task)
 
-        logger.info(
-            "booting Isaac Lab env task=%s num_envs=%d headless=%s",
-            task_alias, self.num_envs, self.headless,
-        )
-        self._isaac_env = make_env(
-            task=task_alias,
-            num_envs=self.num_envs,
-            headless=self.headless,
-        )
+        global _GLOBAL_BACKING_ISAAC_ENV
+        if _GLOBAL_BACKING_ISAAC_ENV is None:
+            logger.info(
+                "booting Isaac Lab env task=%s num_envs=%d headless=%s",
+                task_alias, self.num_envs, self.headless,
+            )
+            _GLOBAL_BACKING_ISAAC_ENV = make_env(
+                task=task_alias,
+                num_envs=self.num_envs,
+                headless=self.headless,
+            )
+        else:
+            logger.info(
+                "reusing existing Isaac Lab backing env (task=%s) — "
+                "SimulationContext singleton enforced",
+                task_alias,
+            )
+        self._isaac_env = _GLOBAL_BACKING_ISAAC_ENV
+        # Eager flag: warm-up below is best-effort; if it throws we must
+        # NOT re-enter _boot() and re-create the SimulationContext.
+        self._booted = True
 
         # 30-frame warm-up so camera buffers are populated. Use the env's
         # sim handle; fall back to no-op if not exposed.
@@ -252,7 +285,6 @@ class IsaacSO101Env(gym.Env):
         # Probe whether the camera obs term is wired. If lerobot-isaac-env
         # still has NotImplementedError stubs for cameras, we'll find out
         # at the first translate and fall back to zeros without crashing.
-        self._booted = True
 
     # ------------------------------------------------------------------ #
     # obs / action translation
