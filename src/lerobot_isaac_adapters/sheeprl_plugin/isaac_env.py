@@ -20,7 +20,8 @@ gym.Env adapter that:
   2. Translates batched (num_envs, ...) tensors → single-env (...,) numpy
      arrays sheeprl expects.
   3. Exposes the canonical sheeprl obs key shape: `{"rgb": (3, H, W),
-     "state": (6,)}`.
+     "state": (6,)}` by default; expands `state` to (13,) when
+     `LEROBOT_ISAAC_INCLUDE_OBJECT_POSE=1`.
 
 Soft-imports throughout — module remains importable in any env
 (sheeprl-only, dashboard-only). Isaac Lab is only loaded inside
@@ -29,6 +30,7 @@ Soft-imports throughout — module remains importable in any env
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import gymnasium as gym
@@ -58,6 +60,18 @@ _GLOBAL_BACKING_ISAAC_ENV: Any = None
 DEFAULT_STATE_KEY = "joint_pos"
 DEFAULT_CAMERA_KEY = "wrist_camera_rgb"
 
+# Opt-in object_pose actor obs — diagnostic for the 2026-05-24 sweep where
+# Grads/actor → 0 because the actor had no object-location signal.
+# When enabled, state_dim expands from 6 to 13 (joint_pos[6] + object_pose[7]).
+_INCLUDE_OBJECT_POSE = os.environ.get("LEROBOT_ISAAC_INCLUDE_OBJECT_POSE", "0") not in (
+    "0",
+    "",
+    "false",
+    "False",
+)
+_STATE_DIM_BASE = 6  # joint_pos (6-DOF)
+_STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
+
 
 class IsaacSO101Env(gym.Env):
     """SO-101 pick-place env wrapped for sheeprl + DreamerV3.
@@ -67,7 +81,9 @@ class IsaacSO101Env(gym.Env):
             "rgb":   uint8 (3, H, W) — wrist camera, falls back to zeros
                                        until lerobot-isaac-env camera term
                                        wiring lands.
-            "state": float32 (6,)    — joint positions.
+            "state": float32 (6,)    — joint positions (default).
+                     float32 (13,)   — joint_pos[6] + object_pose[7] when
+                                       LEROBOT_ISAAC_INCLUDE_OBJECT_POSE=1.
 
     Action: float32 (6,) — joint position targets in [-1, 1] (env's
             JointPositionActionCfg scales these internally).
@@ -106,6 +122,10 @@ class IsaacSO101Env(gym.Env):
         self.state_key = state_key
         self.camera_key = camera_key
 
+        # Compute state dimension based on env-var flag.
+        state_dim = _STATE_DIM_BASE + (_STATE_DIM_OBJECT_POSE if _INCLUDE_OBJECT_POSE else 0)
+        self._state_dim = state_dim
+
         # Spaces declared up-front so sheeprl's make_env() space-inspection
         # codepath succeeds without booting Isaac Lab.
         self.observation_space = gym.spaces.Dict(
@@ -117,7 +137,7 @@ class IsaacSO101Env(gym.Env):
                     dtype=np.uint8,
                 ),
                 "state": gym.spaces.Box(
-                    low=-np.inf, high=np.inf, shape=(6,), dtype=np.float32
+                    low=-np.inf, high=np.inf, shape=(state_dim,), dtype=np.float32
                 ),
             }
         )
@@ -297,6 +317,11 @@ class IsaacSO101Env(gym.Env):
         Defensive: if camera term raises (the lerobot-isaac-env scaffold
         still has NotImplementedError for `wrist_camera_rgb`), return a
         zero RGB. Logs once.
+
+        When LEROBOT_ISAAC_INCLUDE_OBJECT_POSE=1, concatenates the
+        object_pose term (7 dims) to the 6-dim joint_pos vector, yielding
+        a 13-dim state vector that gives the actor direct access to object
+        location — the key diagnostic for the 2026-05-24 sweep collapse.
         """
         # raw_obs shapes seen in the wild:
         #   * dict[group(str)] -> dict[term(str)] -> Tensor    (older API)
@@ -307,23 +332,49 @@ class IsaacSO101Env(gym.Env):
         else:
             group = raw_obs
 
-        # ---- state (joint positions) ----
+        # ---- state (joint positions + optional object_pose) ----
         if isinstance(group, dict):
-            state_val = group.get(self.state_key)
+            # Term-wise obs (older API): concat joint_pos + object_pose if enabled.
+            jp = group.get(self.state_key)
+            parts = [
+                self._tensor_to_np(
+                    jp, default_shape=(_STATE_DIM_BASE,), default_dtype=np.float32
+                ).reshape(-1)[:_STATE_DIM_BASE]
+            ]
+            if _INCLUDE_OBJECT_POSE:
+                op = group.get("object_pose")
+                op_np = self._tensor_to_np(
+                    op,
+                    default_shape=(_STATE_DIM_OBJECT_POSE,),
+                    default_dtype=np.float32,
+                ).reshape(-1)[:_STATE_DIM_OBJECT_POSE]
+                parts.append(op_np)
+            state_np = np.concatenate(parts, axis=0).astype(np.float32, copy=False)
         elif hasattr(group, "shape"):
-            # Flat concat tensor — joint_pos is the first 6 dims per
-            # lerobot_isaac_env.observations.PolicyObsGroupCfg ordering
-            # (joint_pos → joint_vel → last_action → object_pose).
-            state_val = group[..., :6] if group.shape[-1] >= 6 else group
+            # Flat concat tensor (newer API): field order from PolicyObsGroupCfg:
+            #   joint_pos[0:6] + joint_vel[6:12] + last_action[12:18]
+            #   + object_pose[18:25] (when INCLUDE_OBJECT_POSE=1).
+            flat = self._tensor_to_np(
+                group, default_shape=(_STATE_DIM_BASE,), default_dtype=np.float32
+            ).reshape(-1)
+            parts = [flat[:_STATE_DIM_BASE]]
+            if _INCLUDE_OBJECT_POSE:
+                # object_pose lives at dims 18..25 per PolicyObsGroupCfg field order.
+                if flat.size >= 25:
+                    parts.append(flat[18:25])
+                else:
+                    parts.append(np.zeros(_STATE_DIM_OBJECT_POSE, dtype=np.float32))
+            state_np = np.concatenate(parts, axis=0).astype(np.float32, copy=False)
         else:
-            state_val = None
-        state_np = self._tensor_to_np(state_val, default_shape=(6,), default_dtype=np.float32)
+            state_np = np.zeros(self._state_dim, dtype=np.float32)
+
+        # Post-process: squeeze batch dim when single-env; coerce to declared dim.
         if state_np.ndim == 2 and state_np.shape[0] == self.num_envs:
             state_np = state_np[0]
-        if state_np.size >= 6:
-            state_np = state_np.reshape(-1)[:6]
+        if state_np.size >= self._state_dim:
+            state_np = state_np.reshape(-1)[: self._state_dim]
         else:
-            state_np = np.zeros(6, dtype=np.float32)
+            state_np = np.zeros(self._state_dim, dtype=np.float32)
 
         # ---- rgb (camera) ----
         # Concat-tensor group has no camera key extraction path → falls
