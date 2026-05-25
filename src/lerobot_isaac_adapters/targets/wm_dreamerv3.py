@@ -165,10 +165,23 @@ def run(args: argparse.Namespace) -> int:
         import lerobot_isaac_adapters.sheeprl_plugin as _plugin  # local import
         plugin_configs = str(Path(_plugin.__file__).parent / "configs")
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "sheeprl",
+        if use_isaac_env:
+            # Isaac Lab needs SimulationApp booted BEFORE sheeprl imports —
+            # `python -m sheeprl` loses libgobject to hydra+lightning first
+            # and Isaac Sim's gpu_foundation plugin then fails to load.
+            # Our `_wm_isaac_entry.py` claims libgobject via AppLauncher
+            # before delegating to sheeprl.cli.run.
+            entry = Path(__file__).resolve().parents[3].parents[1] / "scripts" / "_wm_isaac_entry.py"
+            # Fallback: resolve from workspace root in case file lives in
+            # an installed site-packages copy.
+            if not entry.is_file():
+                from os import environ
+                ws = Path(environ.get("LEROBOT_ISAAC_WORKSPACE", Path.cwd()))
+                entry = ws / "scripts" / "_wm_isaac_entry.py"
+            cmd = [sys.executable, str(entry)]
+        else:
+            cmd = [sys.executable, "-m", "sheeprl"]
+        cmd += [
             f"--config-dir={plugin_configs}",
             "exp=dreamer_v3",
             f"env={env_name}",

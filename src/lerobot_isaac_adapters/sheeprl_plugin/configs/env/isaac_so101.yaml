@@ -18,6 +18,12 @@ device: cuda
 seed: 42
 dr_config: null          # optional path to a DR config yaml (see lerobot-isaac-env)
 capture_video: False
+# CRITICAL: Isaac Lab pre-boots CUDA via SimulationApp; AsyncVectorEnv's
+# fork-based workers then fail with `Cannot re-initialize CUDA in forked
+# subprocess`. Force SyncVectorEnv (single-process). num_envs > 1 still
+# works inside the single Isaac Lab process (handled by ManagerBasedRLEnv,
+# not gym's vector wrapper).
+sync_env: True
 
 wrapper:
   _target_: lerobot_isaac_adapters.sheeprl_plugin.isaac_env.get_isaac_env
