@@ -142,8 +142,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "--home-on-exit",
         action="store_true",
         help=(
-            "Send a zero-position command before disconnecting. Disable if "
-            "homing through zero would collide with a workspace object."
+            "Ramp arm to zero-position before disconnecting (rate-limited by "
+            "--max-step-deg). Disable if homing through zero would collide "
+            "with a workspace object."
+        ),
+    )
+    p.add_argument(
+        "--max-step-deg",
+        type=float,
+        default=1.0,
+        help=(
+            "Maximum per-step joint motion in degrees (arm joints 0-4). "
+            "Hard-clamps actor output before send_action. Independent of "
+            "server-side max_relative_target. 1.0 = tight, 3.0 = loose."
+        ),
+    )
+    p.add_argument(
+        "--require-real-ckpt",
+        action="store_true",
+        help=(
+            "Refuse motor writes against any checkpoint with a "
+            "synthetic_marker.json file. Also honored via env var "
+            "LI_DEPLOY_REQUIRE_REAL_CKPT=1. Defense-in-depth against "
+            "running test fixtures on real hardware."
         ),
     )
     p.add_argument(
@@ -277,7 +298,13 @@ def _obs_to_policy_input(obs: dict, device: str) -> dict:
 
 
 def _action_to_robot_dict(action: Any, motor_names: list[str]) -> dict[str, float]:
-    """Convert policy output tensor (1, A) into the dict robot.send_action wants."""
+    """Convert policy output tensor (1, A) into the dict robot.send_action wants.
+
+    .. deprecated::
+        Prefer ``_compute_safe_targets()`` which applies the [-1, 1] clip,
+        joint-limit clamp, and per-step bound via lerobot_isaac_deploy.
+        Kept only for dry-run printing where motor writes are inhibited.
+    """
     import numpy as np
 
     arr = action.detach().cpu().numpy() if hasattr(action, "detach") else np.asarray(action)
@@ -289,6 +316,91 @@ def _action_to_robot_dict(action: Any, motor_names: list[str]) -> dict[str, floa
             f"{len(motor_names)} motors: {motor_names!r}"
         )
     return {f"{m}.pos": float(arr[i]) for i, m in enumerate(motor_names)}
+
+
+def _read_current_jp(obs: dict, joint_order: list[str]) -> "np.ndarray":  # noqa: F821
+    """Extract current joint positions from a SO101Follower observation dict.
+
+    Returns float32 array shape (6,) in canonical SO101_JOINT_NAMES order.
+    Raises ValueError on missing keys or non-finite values — caller should
+    treat as a hard stop and not send an action this tick.
+    """
+    import numpy as np
+
+    vals = []
+    for name in joint_order:
+        key = f"{name}.pos"
+        if key not in obs:
+            raise ValueError(f"obs missing motor key: {key}")
+        v = float(obs[key])
+        if not np.isfinite(v):
+            raise ValueError(f"non-finite current_jp[{name}]: {v}")
+        vals.append(v)
+    return np.asarray(vals, dtype=np.float32)
+
+
+def _compute_safe_targets(
+    action: Any,
+    current_jp: "np.ndarray",  # noqa: F821
+    max_step_deg: float,
+) -> dict[str, float]:
+    """Safety-clamped action -> send_action dict.
+
+    Applies the lerobot_isaac_deploy.arm_motor_writer two-layer clamp:
+        1. action clipped to [-1, 1] (bounds per-step motion regardless of
+           upstream actor pathology — raw logits, NaN, unconverged head).
+        2. target = current + clipped_action * max_step_deg clamped to the
+           hardcoded joint-limit floor (includes elbow_flex >= -10° table
+           avoidance).
+    """
+    import numpy as np
+
+    from lerobot_isaac_deploy.arm_motor_writer import (
+        SO101_JOINT_NAMES,
+        compute_targets,
+    )
+
+    arr = action.detach().cpu().numpy() if hasattr(action, "detach") else np.asarray(action)
+    if arr.ndim == 2:
+        arr = arr[0]
+    if arr.shape[0] != 6:
+        raise ValueError(
+            f"policy emitted {arr.shape[0]} action dims; SO-101 expects 6 "
+            f"(joints {SO101_JOINT_NAMES})"
+        )
+    targets = compute_targets(
+        current_jp=current_jp,
+        action=arr,
+        max_step_deg=max_step_deg,
+    )
+    return {f"{name}.pos": float(targets[i]) for i, name in enumerate(SO101_JOINT_NAMES)}
+
+
+def _check_real_ckpt_gate(policy_path: Path, require_real: bool) -> None:
+    """Refuse motor writes against synthetic checkpoint fixtures.
+
+    Mirrors the gate in src/lerobot-isaac-deploy/session.py — synthetic
+    checkpoints carry a ``synthetic_marker.json`` file at the checkpoint
+    root. They exist so the test suite can run without GPU/heavy deps; they
+    MUST NOT drive real motors.
+
+    Raises RuntimeError if the gate is active (CLI flag or env var) AND
+    the marker is present.
+    """
+    import os
+
+    active = require_real or os.environ.get("LI_DEPLOY_REQUIRE_REAL_CKPT", "") == "1"
+    if not active:
+        return
+    marker = Path(policy_path).parent / "synthetic_marker.json"
+    if not marker.exists():
+        marker = Path(policy_path) / "synthetic_marker.json"
+    if marker.exists():
+        raise RuntimeError(
+            "refusing motor writes against synthetic checkpoint at "
+            f"{policy_path} (marker: {marker}). Unset --require-real-ckpt / "
+            "LI_DEPLOY_REQUIRE_REAL_CKPT=1 to override (dangerous)."
+        )
 
 
 _stop = {"flag": False}
@@ -318,6 +430,16 @@ def main(argv: list[str] | None = None) -> int:
         not args.execute,
     )
 
+    # Safety gate: refuse motor writes against synthetic-checkpoint fixtures
+    # when --require-real-ckpt or LI_DEPLOY_REQUIRE_REAL_CKPT=1 is active.
+    # Only enforced when --execute is on; dry-run is always allowed.
+    if args.execute:
+        try:
+            _check_real_ckpt_gate(Path(args.policy_path), args.require_real_ckpt)
+        except RuntimeError as exc:
+            logger.error("synthetic-ckpt gate: %s", exc)
+            return 9
+
     try:
         loaded = _load_policy(Path(args.policy_path), Path(args.dataset_root) if args.dataset_root else None, args.seed)
     except Exception as exc:  # noqa: BLE001
@@ -339,6 +461,10 @@ def main(argv: list[str] | None = None) -> int:
         return 4
 
     motor_names = [m for m in robot.bus.motors]
+    # Use the canonical SO101 joint order for safety-clamped targets — the
+    # bus.motors iteration order is not guaranteed to match.
+    from lerobot_isaac_deploy.arm_motor_writer import SO101_JOINT_NAMES
+
     dt = 1.0 / args.rate_hz
     deadline = time.monotonic() + args.duration_s
 
@@ -356,13 +482,36 @@ def main(argv: list[str] | None = None) -> int:
                 rc = 5
                 break
 
+            # Validate current joint state BEFORE inference. Bad sensor reads
+            # (NaN / missing key / implausible value) -> hard stop, do not
+            # propagate to a motor write.
+            try:
+                current_jp = _read_current_jp(obs, SO101_JOINT_NAMES)
+            except ValueError as exc:
+                logger.error("current_jp validation failed: %s — skipping step", exc)
+                # Skip this tick rather than send an action against bad state.
+                slack = dt - (time.monotonic() - step_start)
+                if slack > 0:
+                    time.sleep(slack)
+                continue
+
             try:
                 import torch
 
                 with torch.no_grad():
                     policy_input = _obs_to_policy_input(obs, loaded.device)
                     action = loaded.policy.select_action(policy_input)
-                action_dict = _action_to_robot_dict(action, motor_names)
+                # Safety-clamped target dict: [-1,1] action clip + joint
+                # limits intersected with elbow-floor preservation, applied
+                # via lerobot_isaac_deploy.arm_motor_writer.compute_targets.
+                action_dict = _compute_safe_targets(
+                    action, current_jp, max_step_deg=args.max_step_deg
+                )
+            except ValueError as exc:
+                # Non-finite action from compute_targets -> hard stop.
+                logger.error("safe-targets rejected action: %s", exc)
+                rc = 6
+                break
             except Exception as exc:  # noqa: BLE001
                 logger.error("policy inference failed: %s", exc)
                 rc = 6
@@ -406,10 +555,31 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if args.home_on_exit and args.execute:
             try:
-                logger.info("homing on exit (zero position)")
-                home = {f"{m}.pos": 0.0 for m in motor_names}
-                robot.send_action(home)
-                time.sleep(0.5)
+                logger.info("ramped home on exit (max %.2f deg/step)", args.max_step_deg)
+                from lerobot_isaac_deploy.arm_motor_writer import ramped_home
+
+                # Read final current_jp; if obs fails or is invalid, fall
+                # back to a single-shot zero target (cannot ramp without a
+                # known start).
+                try:
+                    final_obs = robot.get_observation()
+                    final_jp = _read_current_jp(final_obs, SO101_JOINT_NAMES)
+                    ramped_home(
+                        robot,
+                        current_jp=final_jp,
+                        max_step_deg=args.max_step_deg,
+                        rate_hz=args.rate_hz,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "ramped_home read failed (%s) — falling back to "
+                        "single-shot zero (server-side max_relative_target "
+                        "is the only remaining clamp)",
+                        exc,
+                    )
+                    home = {f"{m}.pos": 0.0 for m in motor_names}
+                    robot.send_action(home)
+                    time.sleep(0.5)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("home-on-exit failed: %s", exc)
         try:
