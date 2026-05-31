@@ -17,6 +17,10 @@ headless: True
 device: cuda
 seed: 42
 dr_config: null          # optional path to a DR config yaml (see lerobot-isaac-env)
+# Wire the wrist D435 RGB obs term (3,480,640) → resized to image_size² for the
+# DreamerV3 CNN. Requires AppLauncher(enable_cameras=True) (the entry script +
+# the wrapper's _boot both pass it). Set False for a state-only world model.
+enable_cameras: True
 capture_video: False
 # CRITICAL: Isaac Lab pre-boots CUDA via SimulationApp; AsyncVectorEnv's
 # fork-based workers then fail with `Cannot re-initialize CUDA in forked
@@ -36,3 +40,4 @@ wrapper:
   device:             ${env.device}
   seed:               ${env.seed}
   dr_config:          ${env.dr_config}
+  enable_cameras:     ${env.enable_cameras}

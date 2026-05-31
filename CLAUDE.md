@@ -114,6 +114,30 @@ All tests pass without lerobot, sheeprl, Isaac Lab, or transformers installed.
 
 ---
 
+## WM-Isaac sheeprl_plugin Pitfalls (GPU-verified 2026-05-31)
+
+The DreamerV3-on-Isaac path (`sheeprl_plugin/isaac_env.py` + `scripts/_wm_isaac_entry.py`)
+had a "training stall" that was really a **masked crash + Isaac teardown hang**:
+
+- **`IsaacSO101Env.close()` must be a NO-OP on the backing env.** The backing
+  `ManagerBasedRLEnv` is a process-global singleton (`_GLOBAL_BACKING_ISAAC_ENV`).
+  sheeprl `dreamer_v3.py:765` calls `envs.close()` then `:767 test()`, which builds
+  a fresh wrapper that reuses the singleton. Closing it deletes `.scene` → eval
+  reset crashes `'ManagerBasedRLEnv' object has no attribute 'scene'`.
+- **`_wm_isaac_entry.py` must `os._exit(code)`** after `run()`. Isaac's atexit
+  `SimulationApp.close()` hangs in `render()`; without the hard exit a finished or
+  crashed trial holds ~1.6 GB VRAM forever and looks frozen (`metric=-9999`).
+- **`learning_starts ≥ per_rank_sequence_length (64)`** or the first grad update
+  raises `ValueError: Cannot sample a sequence of length 64` (`buffers.py:432`).
+  Keep `seq_len ≤ learning_starts < total_steps`. Prod default 1024 is fine.
+- **Camera RGB is now wired (2026-05-31).** `make_env(enable_cameras=True)` adds the
+  `d435_rgb` term (3,480,640); the wrapper (`camera_key="d435_rgb"`, default
+  `enable_cameras=True`) resizes it to `image_size`² via `_resize_chw` before the
+  CNN. Verified: `Loss/observation_loss≈85` on real frames (vs ~0 for the old
+  all-zero RGB). Toggle off with `env.enable_cameras=False` for a state-only WM.
+- **Diagnose with `faulthandler.dump_traceback_later()`**, not py-spy — host has
+  `ptrace_scope=1` + no passwordless sudo, so cross-shell `py-spy dump` is blocked.
+
 ## Spinout
 
 ```bash

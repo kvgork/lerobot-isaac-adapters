@@ -58,7 +58,11 @@ _GLOBAL_BACKING_ISAAC_ENV: Any = None
 # back to zero RGB until those land. See CLAUDE.md §"Camera observation
 # wiring" in the training workspace.
 DEFAULT_STATE_KEY = "joint_pos"
-DEFAULT_CAMERA_KEY = "wrist_camera_rgb"
+# DR100 Phase 1 (2026-05-26) replaced `wrist_camera_rgb`/`overhead_camera_rgb`
+# with the single wrist-mounted `d435_rgb` term (3, 480, 640), matching the real
+# SO-101 dataset column `observation.images.d435_rgb`. The wrapper resizes it to
+# `image_size`² before handing it to the DreamerV3 CNN encoder.
+DEFAULT_CAMERA_KEY = "d435_rgb"
 
 # Opt-in object_pose actor obs — diagnostic for the 2026-05-24 sweep where
 # Grads/actor → 0 because the actor had no object-location signal.
@@ -109,6 +113,7 @@ class IsaacSO101Env(gym.Env):
         dr_config: str | None = None,
         state_key: str = DEFAULT_STATE_KEY,
         camera_key: str = DEFAULT_CAMERA_KEY,
+        enable_cameras: bool = True,
     ) -> None:
         super().__init__()
         self.task = task
@@ -121,6 +126,7 @@ class IsaacSO101Env(gym.Env):
         self.dr_config = dr_config
         self.state_key = state_key
         self.camera_key = camera_key
+        self.enable_cameras = enable_cameras
 
         # Compute state dimension based on env-var flag.
         state_dim = _STATE_DIM_BASE + (_STATE_DIM_OBJECT_POSE if _INCLUDE_OBJECT_POSE else 0)
@@ -196,14 +202,26 @@ class IsaacSO101Env(gym.Env):
         )
 
     def close(self) -> None:
-        if self._isaac_env is not None:
-            try:
-                self._isaac_env.close()
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "IsaacSO101Env.close raised; SimulationApp.close "
-                    "deadlocks on Isaac Sim 6.0 — caller should os._exit(0)."
-                )
+        # NO-OP on the shared backing env — deliberately do NOT close it.
+        #
+        # sheeprl's dreamer_v3.main() calls `envs.close()` immediately BEFORE
+        # the eval phase (`dreamer_v3.py:765` then `test(player, ...)` at :767).
+        # test() builds a FRESH env via `make_env(...)()` and resets it — that
+        # fresh IsaacSO101Env reuses `_GLOBAL_BACKING_ISAAC_ENV`. If close()
+        # actually called `self._isaac_env.close()`, ManagerBasedRLEnv deletes
+        # its `.scene`, so the test reset crashes with
+        # `'ManagerBasedRLEnv' object has no attribute 'scene'` — which then
+        # hangs forever in Isaac's atexit SimulationApp.close()→render() and
+        # masquerades as the WM-Isaac "training stall" (metric=-9999).
+        #
+        # The backing env is a process-wide singleton (Isaac's SimulationContext
+        # is process-global); it must outlive any single wrapper. Real teardown
+        # happens at process exit, which `_wm_isaac_entry.py` forces via
+        # os._exit() to bypass the hanging atexit close.
+        logger.info(
+            "IsaacSO101Env.close(): no-op — shared backing env kept alive for "
+            "the eval/test phase (see sheeprl dreamer_v3.py:765-767)."
+        )
 
     # ------------------------------------------------------------------ #
     # boot
@@ -273,13 +291,14 @@ class IsaacSO101Env(gym.Env):
         global _GLOBAL_BACKING_ISAAC_ENV
         if _GLOBAL_BACKING_ISAAC_ENV is None:
             logger.info(
-                "booting Isaac Lab env task=%s num_envs=%d headless=%s",
-                task_alias, self.num_envs, self.headless,
+                "booting Isaac Lab env task=%s num_envs=%d headless=%s cameras=%s",
+                task_alias, self.num_envs, self.headless, self.enable_cameras,
             )
             _GLOBAL_BACKING_ISAAC_ENV = make_env(
                 task=task_alias,
                 num_envs=self.num_envs,
                 headless=self.headless,
+                enable_cameras=self.enable_cameras,
             )
         else:
             logger.info(
@@ -377,8 +396,11 @@ class IsaacSO101Env(gym.Env):
             state_np = np.zeros(self._state_dim, dtype=np.float32)
 
         # ---- rgb (camera) ----
-        # Concat-tensor group has no camera key extraction path → falls
-        # back to zero RGB until cameras are wired in lerobot-isaac-env.
+        # With enable_cameras=True the policy group is a dict carrying the
+        # `d435_rgb` term at the camera's NATIVE resolution (3, 480, 640) — far
+        # larger than the DreamerV3 CNN's 64² input — so we RESIZE it down here
+        # (the encoder cnn_keys point at this `rgb` key). If cameras are off or
+        # the term is a stub, fall back to a zero frame of the declared shape.
         rgb_val = group.get(self.camera_key) if isinstance(group, dict) else None
         try:
             rgb_np = self._tensor_to_np(
@@ -400,12 +422,14 @@ class IsaacSO101Env(gym.Env):
         if rgb_np.ndim == 4 and rgb_np.shape[0] == self.num_envs:
             rgb_np = rgb_np[0]
         if rgb_np.ndim == 3 and rgb_np.shape[-1] == 3:
-            self._last_rgb_hwc = rgb_np  # for render()
-            rgb_np = rgb_np.transpose(2, 0, 1)  # → (3, H, W)
-        elif rgb_np.ndim == 3 and rgb_np.shape[0] == 3:
-            self._last_rgb_hwc = rgb_np.transpose(1, 2, 0)
-        # If shape is still off, coerce to the declared obs space.
-        if rgb_np.shape != (3, self.image_size, self.image_size):
+            rgb_np = rgb_np.transpose(2, 0, 1)  # HWC → (3, H, W)
+        # Now rgb_np should be (3, H, W). Resize to (3, image_size, image_size)
+        # if it carries a real frame; only zero-fill as a last resort.
+        if rgb_np.ndim == 3 and rgb_np.shape[0] == 3:
+            if rgb_np.shape[1:] != (self.image_size, self.image_size):
+                rgb_np = self._resize_chw(rgb_np, self.image_size)
+            self._last_rgb_hwc = rgb_np.transpose(1, 2, 0)  # for render()
+        else:
             rgb_np = np.zeros((3, self.image_size, self.image_size), dtype=np.uint8)
             self._last_rgb_hwc = np.zeros(
                 (self.image_size, self.image_size, 3), dtype=np.uint8
@@ -459,6 +483,27 @@ class IsaacSO101Env(gym.Env):
         return torch.as_tensor(arr, dtype=torch.float32, device=self.device)
 
     @staticmethod
+    def _resize_chw(chw_np: np.ndarray, size: int) -> np.ndarray:
+        """Resize a (3, H, W) uint8 array to (3, size, size) uint8.
+
+        Uses torch bilinear interpolation (cv2-free — cv2 is not a dependency of
+        this env, matching the bridge's PIL/torch-only stance). Falls back to a
+        crude stride subsample if torch is somehow unavailable.
+        """
+        try:
+            import torch
+            import torch.nn.functional as F
+
+            t = torch.from_numpy(np.ascontiguousarray(chw_np)).unsqueeze(0).float()
+            t = F.interpolate(t, size=(size, size), mode="bilinear", align_corners=False)
+            return t.squeeze(0).clamp_(0, 255).to(torch.uint8).numpy()
+        except Exception:  # noqa: BLE001 — never let a resize break the rollout
+            h, w = chw_np.shape[1], chw_np.shape[2]
+            ys = (np.linspace(0, h - 1, size)).astype(np.int64)
+            xs = (np.linspace(0, w - 1, size)).astype(np.int64)
+            return chw_np[:, ys][:, :, xs].astype(np.uint8, copy=False)
+
+    @staticmethod
     def _scalar(t: Any) -> Any:
         """Squeeze a (1,)-shape tensor or array to a python scalar."""
         if t is None:
@@ -489,6 +534,7 @@ def get_isaac_env(
     device: str = "cuda",
     seed: int | None = None,
     dr_config: str | None = None,
+    enable_cameras: bool = True,
 ) -> IsaacSO101Env:
     """Hydra-friendly factory wrapping :class:`IsaacSO101Env`.
 
@@ -506,4 +552,5 @@ def get_isaac_env(
         device=device,
         seed=seed,
         dr_config=dr_config,
+        enable_cameras=enable_cameras,
     )
