@@ -31,7 +31,7 @@ CLI
         --port /dev/ttyACM0 \\
         --rate-hz 30 --duration-s 60 \\
         --dataset-root datasets/kvgork/so101-pickplace1 \\
-        --camera d435_rgb=/dev/video0,640,480 \\
+        --camera d435_rgb=/dev/video2,640,480 \\
         --max-relative-target 5.0 \\
         --home-on-exit
         # add --execute to leave dry-run mode
@@ -96,7 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Camera spec `name=device,W,H`. Repeatable. Example: "
-            "`d435_rgb=/dev/video0,640,480`. If your policy expects images "
+            "`d435_rgb=/dev/video2,640,480`. If your policy expects images "
             "under `observation.images.<name>`, the name MUST match."
         ),
     )
@@ -186,6 +186,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "-v", "--verbose", action="store_true", help="Log every action."
     )
+    p.add_argument(
+        "--id",
+        dest="robot_id",
+        default=None,
+        help=(
+            "Fixed SO-101 follower calibration id. Calibration persists at "
+            "<HF_LEROBOT_CALIBRATION>/robots/so_follower/<id>.json and is reused "
+            "across runs instead of an anonymous None.json."
+        ),
+    )
     return p
 
 
@@ -259,12 +269,16 @@ def _parse_camera_specs(specs: list[str]) -> dict[str, Any]:
 def _build_robot(args: argparse.Namespace) -> Any:
     from lerobot.robots.so_follower import SO101Follower, SO101FollowerConfig
 
-    cfg = SO101FollowerConfig(
+    follower_kwargs: dict[str, Any] = dict(
         port=args.port,
         max_relative_target=float(args.max_relative_target),
         use_degrees=bool(args.use_degrees),
         cameras=_parse_camera_specs(args.camera),
     )
+    # Fixed calibration id → stable <id>.json (reused). Omitted when None.
+    if getattr(args, "robot_id", None):
+        follower_kwargs["id"] = args.robot_id
+    cfg = SO101FollowerConfig(**follower_kwargs)
     return SO101Follower(cfg)
 
 
@@ -418,6 +432,17 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
     )
+    # Force HF offline BEFORE importing lerobot/hf_hub (deferred to _load_policy)
+    # so the cached SmolVLM2 backbone is not re-validated on every load — stops
+    # the per-load HTTP request flood. Override with HF_HUB_OFFLINE=0.
+    import os as _os
+
+    _os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    _os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    _os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+    for _n in ("httpx", "huggingface_hub", "urllib3"):
+        logging.getLogger(_n).setLevel(logging.WARNING)
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
