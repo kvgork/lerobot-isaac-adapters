@@ -123,7 +123,24 @@ def run(args: argparse.Namespace) -> int:
     # / --training.lr in older releases — those flags were removed). For local datasets
     # the caller can also pass `--dataset.root=<path>` via remainder args; we infer it
     # automatically when `args.dataset` looks like an on-disk path.
-    dataset_repo_id, dataset_root = _split_dataset_arg(args.dataset)
+    #
+    # Multi-dataset (B.2): train.py normalises --dataset/--datasets into
+    # args.dataset_list. With >1 entry we forward a comma-joined repo_id to
+    # lerobot's MultiLeRobotDataset path. (A single local --dataset.root is the
+    # only per-dataset root the lerobot CLI accepts; multiple *local* roots must
+    # be merged first — flagged below in the dry-run summary.)
+    dataset_list = getattr(args, "dataset_list", None) or (
+        [args.dataset] if args.dataset else []
+    )
+    specs = [_split_dataset_arg(d) for d in dataset_list] or [
+        _split_dataset_arg(args.dataset)
+    ]
+    multi = len(specs) > 1
+    dataset_repo_id = ",".join(s[0] for s in specs)
+    roots = [s[1] for s in specs if s[1]]
+    # Single combined root only when exactly one local root is present.
+    dataset_root = roots[0] if len(roots) == 1 else None
+    multi_local_roots = len(roots) > 1
 
     # Decide whether to route through the in-process wrapper (cached or LoRA).
     # The wrapper monkey-patches make_dataset (cache) and/or make_policy (LoRA)
@@ -167,6 +184,16 @@ def run(args: argparse.Namespace) -> int:
         cmd.extend(extra)
 
     if args.dry_run:
+        if multi:
+            print(f"[policy_lerobot] multi-dataset ({len(specs)}):")
+            for repo_id, root in specs:
+                print(f"  - {repo_id}  root={root or '(hf)'}")
+            if multi_local_roots:
+                print(
+                    "[policy_lerobot] WARNING: multiple local roots — lerobot-train "
+                    "accepts a single --dataset.root. Merge first via "
+                    "`python -m lerobot_isaac_synthetic.merge` before a real run."
+                )
         print(shlex.join(cmd))
         if use_lora:
             print(
@@ -175,6 +202,21 @@ def run(args: argparse.Namespace) -> int:
                 f"target_modules={args.lora_target_modules}"
             )
         return 0
+
+    # Multiple *local* dataset roots cannot be expressed on the lerobot CLI
+    # (single --dataset.root only). Refuse a real run and point at merge.
+    if multi_local_roots:
+        import sys
+
+        print(
+            "[policy_lerobot] ERROR: multiple local dataset roots are not "
+            "supported by lerobot-train. Merge them first:\n"
+            "  python -m lerobot_isaac_synthetic.merge --real <a> --sim <b> "
+            "--out <merged>\n"
+            "then train on the merged dataset with --dataset <merged>.",
+            file=sys.stderr,
+        )
+        return 2
 
     # Forward cache-knob to the wrapper subprocess via env (cli_train_cached
     # reads LEROBOT_ISAAC_CACHE_RAM_GB at make_dataset patch time).

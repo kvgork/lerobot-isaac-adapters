@@ -75,6 +75,20 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--datasets",
+        default=None,
+        metavar="PATH1,PATH2,...",
+        action="append",
+        help=(
+            "Train on MULTIPLE datasets. Comma-separated and/or repeatable "
+            "(e.g. --datasets a,b  or  --datasets a --datasets b). Each entry "
+            "is a local LeRobotDataset dir or an HF repo id. Takes precedence "
+            "over --dataset. Policy archs forward the combined set to "
+            "lerobot-train's MultiLeRobotDataset path (HF repo ids) or merge "
+            "local dirs first; world-model archs require a single --dataset."
+        ),
+    )
+    parser.add_argument(
         "--config",
         default=None,
         metavar="PATH",
@@ -204,6 +218,24 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_dataset_list(args: argparse.Namespace) -> list[str]:
+    """Flatten ``--datasets`` (repeatable + comma-separated) into one list.
+
+    ``--datasets`` takes precedence over ``--dataset``. Returns ``[]`` when
+    neither is given. Each ``--datasets`` occurrence may itself be a
+    comma-separated string, so ``--datasets a,b --datasets c`` -> [a, b, c].
+    """
+    raw = getattr(args, "datasets", None)
+    if raw:
+        out: list[str] = []
+        for chunk in raw:
+            out.extend(d.strip() for d in str(chunk).split(",") if d.strip())
+        return out
+    if getattr(args, "dataset", None):
+        return [args.dataset]
+    return []
+
+
 def _dispatch(args: argparse.Namespace) -> int:
     """Route to the correct backend module based on ``args.target_arch``.
 
@@ -212,6 +244,19 @@ def _dispatch(args: argparse.Namespace) -> int:
     int
         Exit code (0 on success, including dry-run).
     """
+    # Normalise multi-dataset input once; backends read args.dataset_list.
+    args.dataset_list = _resolve_dataset_list(args)
+
+    # World-model backends accept exactly one dataset.
+    if len(args.dataset_list) > 1 and args.target_arch in _WM_ARCHS:
+        print(
+            f"[lerobot-isaac-train] ERROR: --datasets with "
+            f"{len(args.dataset_list)} entries is unsupported for "
+            f"target_arch={args.target_arch!r}; world-model backends accept a "
+            f"single --dataset. Merge first or pass one dataset.",
+            file=sys.stderr,
+        )
+        return 2
     # smolvla-only guard: warn and clear use_lora for unsupported archs.
     if getattr(args, "use_lora", False) and args.target_arch != "smolvla":
         print(
@@ -226,6 +271,7 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(
             f"[dry_run] target_arch={args.target_arch} "
             f"dataset={args.dataset} "
+            f"datasets={args.dataset_list} "
             f"output_dir={args.output_dir} "
             f"steps={args.steps} "
             f"batch_size={args.batch_size} "
