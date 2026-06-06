@@ -163,13 +163,14 @@ packages:
 - pypi: ./
   name: lerobot-isaac-adapters
   version: 0.1.0
-  sha256: 68353b28c4f7002a119c46bd103acd455b09a9f2043e00f13f0f8a6e8f69f81e
+  sha256: 937fbe56b7ee0cf0f52cc140ff08c2c876937100a1bbffa979362ef1ab55b250
   requires_dist:
   - pyyaml
   - lerobot ; extra == 'lerobot'
   - sheeprl ; extra == 'dreamerv3'
   - transformers ; extra == 'leworldmodel'
   - datasets ; extra == 'leworldmodel'
+  - lerobot-isaac-configs ; extra == 'monorepo'
   requires_python: '>=3.10'
 - conda: https://conda.anaconda.org/conda-forge/linux-64/libexpat-2.8.0-hecca717_0.conda
   sha256: ea33c40977ea7a2c3658c522230058395bc2ee0d89d99f0711390b6a1ee80d12
