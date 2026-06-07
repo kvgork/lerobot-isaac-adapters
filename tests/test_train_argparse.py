@@ -383,3 +383,19 @@ class TestLoraFlags:
         combined = (captured.out + captured.err).lower()
         assert "lora" in combined and "smolvla" in combined
         assert rc == 0
+
+
+class TestSuccessesOnlyFlag:
+    """--successes_only is an opt-in store_true flag, default False."""
+
+    def test_default_false(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "smolvla"])
+        assert args.successes_only is False
+
+    def test_flag_sets_true(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["--target_arch", "smolvla", "--successes_only"]
+        )
+        assert args.successes_only is True

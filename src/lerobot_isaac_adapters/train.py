@@ -161,6 +161,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "MemoryError mid-warmup if exceeded. Default: %(default)s GB."
         ),
     )
+    parser.add_argument(
+        "--successes_only",
+        action="store_true",
+        help=(
+            "Train only on successful demonstrations. Reads the recorder's "
+            "per-episode success sidecar (meta/episode_labels.json) from the "
+            "local dataset root and forwards the successful episode indices to "
+            "lerobot-train via --dataset.episodes. Policy archs only; requires a "
+            "single local --dataset. No-op (with a warning) if the dataset is "
+            "unlabelled, has no successes, or is an HF repo / multi-local set."
+        ),
+    )
     # --- LoRA / PEFT flags (Phase 1.4) ----------------------------------
     parser.add_argument(
         "--use_lora",

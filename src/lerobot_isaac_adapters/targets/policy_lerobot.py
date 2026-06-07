@@ -59,6 +59,39 @@ def _split_dataset_arg(dataset: str | None) -> tuple[str, str | None]:
     return dataset, None
 
 
+def _successful_episode_indices(dataset_root: str) -> list[int] | None:
+    """Read the recorder's per-episode success sidecar and return success indices.
+
+    The dual-write recorder (``robot-data-recorder``) drops reward/done from the
+    parquet features (lerobot 0.5.1 + numpy>=2 crash on shape-(1,) scalar
+    features) and instead writes ``meta/episode_labels.json`` next to the parquet
+    data. This reader is intentionally inline JSON — the adapter must NOT import
+    ``robot_data_recorder`` (it is a standalone package, not a meta dependency).
+
+    Returns
+    -------
+    list[int] | None
+        Sorted ``episode_index`` values whose episode is a success, or ``None``
+        when no sidecar is present (i.e. the dataset was never success-labelled).
+    """
+    import json
+    import os
+
+    sidecar = os.path.join(dataset_root, "meta", "episode_labels.json")
+    if not os.path.isfile(sidecar):
+        return None
+    with open(sidecar) as fh:
+        payload = json.load(fh)
+    keep: list[int] = []
+    for ep in payload.get("episodes", []):
+        idx = ep.get("episode_index")
+        if idx is None:
+            continue
+        if bool(ep.get("success", False)) or float(ep.get("terminal_reward", 0.0)) > 0.0:
+            keep.append(int(idx))
+    return sorted(keep)
+
+
 def _lerobot_policy_type(target_arch: str) -> str:
     """Map ``--target_arch`` to the LeRobot ``--policy.type`` string.
 
@@ -175,6 +208,36 @@ def run(args: argparse.Namespace) -> int:
     ]
     if dataset_root:
         cmd.append(f"--dataset.root={dataset_root}")
+
+    # --successes_only: drop failure demonstrations from BC training by passing
+    # the successful episode indices to lerobot-train's `--dataset.episodes`.
+    # The success labels come from the recorder's parquet sidecar; filtering is
+    # only possible for a single local dataset root (the sidecar lives on disk).
+    if getattr(args, "successes_only", False):
+        if dataset_root and not multi_local_roots:
+            keep = _successful_episode_indices(dataset_root)
+            if keep is None:
+                print(
+                    "[policy_lerobot] --successes_only: no meta/episode_labels.json "
+                    f"in {dataset_root}; training on ALL episodes."
+                )
+            elif len(keep) == 0:
+                print(
+                    "[policy_lerobot] --successes_only: 0 successful episodes in the "
+                    "sidecar; training on ALL episodes (investigate the recording)."
+                )
+            else:
+                cmd.append(f"--dataset.episodes=[{','.join(str(i) for i in keep)}]")
+                print(
+                    f"[policy_lerobot] --successes_only: training on {len(keep)} "
+                    "successful episode(s); failures dropped."
+                )
+        else:
+            print(
+                "[policy_lerobot] --successes_only ignored: requires a single local "
+                "dataset root (success labels are stored on disk next to the parquet)."
+            )
+
     if args.config:
         cmd.insert(1, f"--config_path={args.config}")
 

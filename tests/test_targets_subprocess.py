@@ -481,3 +481,57 @@ class TestWmLeWorldModelSubprocess:
 
         captured = capsys.readouterr()
         assert "pred_loss=0.018" in captured.out
+
+
+# ---------------------------------------------------------------------------
+# --successes_only: filter BC training to successful episodes via the
+# recorder's meta/episode_labels.json sidecar (read inline, no recorder import).
+# ---------------------------------------------------------------------------
+
+
+def _make_local_dataset(tmp_path, labels):
+    """Create a minimal local dataset dir carrying a success sidecar."""
+    import json
+
+    root = tmp_path / "org" / "name"
+    (root / "meta").mkdir(parents=True)
+    (root / "meta" / "episode_labels.json").write_text(
+        json.dumps({"schema_version": 1, "episodes": labels})
+    )
+    return root
+
+
+def test_successes_only_injects_dataset_episodes(tmp_path, capsys) -> None:
+    root = _make_local_dataset(
+        tmp_path,
+        [
+            {"episode_index": 0, "success": True, "terminal_reward": 1.0},
+            {"episode_index": 1, "success": False, "terminal_reward": 0.0},
+            {"episode_index": 2, "success": True, "terminal_reward": 1.0},
+        ],
+    )
+    args = _make_args(dataset=str(root), successes_only=True, dry_run=True)
+    rc = policy_lerobot.run(args)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "--dataset.episodes=[0,2]" in out
+    assert "2 successful episode(s)" in out
+
+
+def test_successes_only_no_sidecar_trains_on_all(tmp_path, capsys) -> None:
+    root = tmp_path / "org" / "name"
+    root.mkdir(parents=True)  # local dir, but no meta/episode_labels.json
+    args = _make_args(dataset=str(root), successes_only=True, dry_run=True)
+    policy_lerobot.run(args)
+    out = capsys.readouterr().out
+    assert "no meta/episode_labels.json" in out
+    assert "--dataset.episodes" not in out
+
+
+def test_successes_only_ignored_for_hf_repo(capsys) -> None:
+    # HF repo id (not a local dir) -> sidecar unreachable -> ignored with warning.
+    args = _make_args(dataset="lerobot/pusht", successes_only=True, dry_run=True)
+    policy_lerobot.run(args)
+    out = capsys.readouterr().out
+    assert "--successes_only ignored" in out
+    assert "--dataset.episodes" not in out

@@ -42,7 +42,7 @@ Console script: `lerobot-isaac-train` → `lerobot_isaac_adapters.train:main`
 | File | Purpose |
 |------|---------|
 | `src/lerobot_isaac_adapters/train.py` | argparse + dispatch router |
-| `src/lerobot_isaac_adapters/targets/policy_lerobot.py` | smolvla/act/diffusion — spawns `lerobot-train` subprocess |
+| `src/lerobot_isaac_adapters/targets/policy_lerobot.py` | smolvla/act/diffusion — spawns `lerobot-train` subprocess. `--successes_only` reads the recorder's `meta/episode_labels.json` sidecar (inline JSON; NO `robot_data_recorder` import — coupling rule) and forwards successful indices via `--dataset.episodes`. Single local dataset only. |
 | `src/lerobot_isaac_adapters/targets/wm_dreamerv3.py` | DreamerV3 — `lerobot_world_model_bridge` Parquet→HDF5 (64×64) + `sheeprl exp=dreamer_v3` subprocess; parses `recon_loss=` |
 | `src/lerobot_isaac_adapters/targets/wm_leworldmodel.py` | HF LeWorldModel — bridge Parquet→HDF5 (96×96, win=16) + `python -m lerobot.scripts.train_world_model`; parses `pred_loss=` |
 | `src/lerobot_isaac_adapters/metric_extractor.py` | canonical stdout metric emitter |
