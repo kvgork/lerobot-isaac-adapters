@@ -66,18 +66,20 @@ class IsaacSO101VectorEnv(gym.vector.VectorEnv):
         self.single_action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(6,), dtype=np.float32)
         self.observation_space = gym.vector.utils.batch_space(self.single_observation_space, self.num_envs)
         self.action_space = gym.vector.utils.batch_space(self.single_action_space, self.num_envs)
-        self._t = 0
+        # PER-ENV step counter — a single scalar would desync once envs terminate
+        # early (SAME_STEP autoreset), mislabelling truncated + episode length.
+        self._t = np.zeros(self.num_envs, dtype=np.int64)
 
     # ------------------------------------------------------------------ #
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         if not self._w._booted:
             self._w._boot()
-        self._t = 0
+        self._t[:] = 0
         raw_obs, raw_info = self._w._isaac_env.reset(seed=seed)
         return self._batched_obs(raw_obs), self._batched_info(raw_info)
 
     def step(self, actions: np.ndarray):
-        self._t += 1
+        self._t += 1  # elementwise (per-env)
         import torch
 
         act = actions if hasattr(actions, "to") else torch.as_tensor(actions, dtype=torch.float32, device=self.device)
@@ -87,8 +89,8 @@ class IsaacSO101VectorEnv(gym.vector.VectorEnv):
         reward = self._to_np(raw_rew).reshape(-1)[: self.num_envs].astype(np.float32)
         terminated = self._to_np(raw_term).reshape(-1)[: self.num_envs].astype(bool)
         truncated = self._to_np(raw_trunc).reshape(-1)[: self.num_envs].astype(bool)
-        if self._t >= self.max_episode_steps:
-            truncated = np.ones(self.num_envs, dtype=bool)
+        # per-env time-limit truncation
+        truncated = truncated | (self._t >= self.max_episode_steps)
         info = self._batched_info(raw_info)
 
         # Episode-return tracking → emit infos["episode"]/["_episode"] on done.
@@ -106,10 +108,10 @@ class IsaacSO101VectorEnv(gym.vector.VectorEnv):
                     final_info[i] = {"episode": {"r": np.array([float(self._ep_r[i])]),
                                                  "l": np.array([float(self._ep_l[i])])}}
             info["final_info"] = final_info
+            # zero per-env accumulators + step counter for the envs that finished
             self._ep_r[done] = 0.0
             self._ep_l[done] = 0
-            if self._t >= self.max_episode_steps:
-                self._t = 0
+            self._t[done] = 0
         return obs, reward, terminated, truncated, info
 
     # ------------------------------------------------------------------ #

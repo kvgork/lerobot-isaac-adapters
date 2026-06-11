@@ -6,6 +6,7 @@ import pytest
 from lerobot_isaac_adapters.sheeprl_plugin.demo_buffer import (
     DemoBuffer,
     bc_weight,
+    _to_chw_uint8,
 )
 
 
@@ -46,6 +47,21 @@ def test_demo_buffer_rejects_too_long_seq():
 def test_demo_buffer_drops_empty_episodes():
     buf = DemoBuffer(episodes=[_fake_episode(0), _fake_episode(10)])
     assert buf.n_episodes == 1
+
+
+def test_to_chw_uint8_nonsquare_float_hwc():
+    # real-cam-style: (480,640,3) float[0,1] HWC → (3,64,64) uint8, bilinear (no crash)
+    img = np.random.default_rng(0).random((480, 640, 3)).astype(np.float32)
+    out = _to_chw_uint8(img, 64)
+    assert out.shape == (3, 64, 64)
+    assert out.dtype == np.uint8
+    assert out.max() <= 255 and out.min() >= 0
+
+
+def test_to_chw_uint8_already_chw_uint8():
+    img = np.zeros((3, 64, 64), dtype=np.uint8)
+    out = _to_chw_uint8(img, 64)
+    assert out.shape == (3, 64, 64) and out.dtype == np.uint8
 
 
 def test_bc_weight_schedule():

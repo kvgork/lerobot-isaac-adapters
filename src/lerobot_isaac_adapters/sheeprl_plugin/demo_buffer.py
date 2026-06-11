@@ -90,7 +90,9 @@ def _frames_to_stepdata(frames, image_size, camera_key, state_key, action_key) -
     is_first[0] = True
     terminated = np.zeros((T, 1), dtype=bool)
     truncated = np.zeros((T, 1), dtype=bool)
-    truncated[-1] = True  # episode end (success demos; reward learned via BC, not r)
+    # Success demos: the final step is a TRUE terminal (object placed), not a time
+    # truncation → terminated[-1]=True so DreamerV3 doesn't bootstrap past it.
+    terminated[-1] = True
     return {"rgb": rgb, "state": state, "actions": actions, "rewards": z,
             "terminated": terminated, "truncated": truncated, "is_first": is_first}
 
@@ -110,10 +112,27 @@ def _to_chw_uint8(img: np.ndarray, size: int) -> np.ndarray:
     if a.dtype != np.uint8:  # float [0,1] → uint8
         a = (np.clip(a, 0.0, 1.0) * 255).astype(np.uint8)
     if a.shape[1:] != (size, size):
-        ys = np.linspace(0, a.shape[1] - 1, size).astype(np.int64)
-        xs = np.linspace(0, a.shape[2] - 1, size).astype(np.int64)
-        a = a[:, ys][:, :, xs]
+        a = _resize_chw_bilinear(a, size)
     return a.astype(np.uint8, copy=False)
+
+
+def _resize_chw_bilinear(chw_np: np.ndarray, size: int) -> np.ndarray:
+    """Resize (3,H,W) uint8 → (3,size,size) uint8 with bilinear interpolation —
+    SAME method as IsaacSO101Env._resize_chw (the online path), so demo frames are
+    pixel-consistent with what the env produces (not aspect-distorted nearest-
+    neighbour). torch fallback to stride-subsample if torch is unavailable.
+    """
+    try:
+        import torch
+        import torch.nn.functional as F
+
+        t = torch.from_numpy(np.ascontiguousarray(chw_np)).unsqueeze(0).float()
+        t = F.interpolate(t, size=(size, size), mode="bilinear", align_corners=False)
+        return t.squeeze(0).clamp_(0, 255).to(torch.uint8).numpy()
+    except Exception:  # noqa: BLE001
+        ys = np.linspace(0, chw_np.shape[1] - 1, size).astype(np.int64)
+        xs = np.linspace(0, chw_np.shape[2] - 1, size).astype(np.int64)
+        return chw_np[:, ys][:, :, xs].astype(np.uint8, copy=False)
 
 
 # --------------------------------------------------------------------------- #
