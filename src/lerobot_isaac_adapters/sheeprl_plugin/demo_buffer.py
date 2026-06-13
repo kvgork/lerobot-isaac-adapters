@@ -54,13 +54,24 @@ def load_sim_demos(
     repo_id = "/".join(parts[-2:]) if len(parts) >= 2 else Path(dataset_root).name
     ds = LeRobotDataset(repo_id=repo_id, root=str(dataset_root))
 
+    # Optional per-episode env-reward sidecar (lerobot 0.5.1 can't store a (1,) reward
+    # feature). When present, real rewards replace the reward-0 default — seeding demos
+    # with reward 0 poisons the DreamerV3 reward model (warmstart-v1 plateaued ~-30).
+    rew_dir = Path(dataset_root) / "meta" / "demo_rewards"
+
     episodes: list[dict[str, np.ndarray]] = []
     n_eps = ds.meta.total_episodes if max_episodes is None else min(max_episodes, ds.meta.total_episodes)
     for ep_idx in range(n_eps):
         frames = _episode_frames(ds, ep_idx)
         if not frames:
             continue
-        episodes.append(_frames_to_stepdata(frames, image_size, camera_key, state_key, action_key))
+        sd = _frames_to_stepdata(frames, image_size, camera_key, state_key, action_key)
+        rew_file = rew_dir / f"ep_{ep_idx:04d}.npy"
+        if rew_file.exists():
+            rew = np.load(rew_file).astype(np.float32).reshape(-1)
+            if rew.shape[0] == sd["rewards"].shape[0]:
+                sd["rewards"] = rew.reshape(-1, 1)
+        episodes.append(sd)
     return episodes
 
 
