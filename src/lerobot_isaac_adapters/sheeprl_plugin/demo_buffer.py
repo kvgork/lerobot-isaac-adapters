@@ -65,10 +65,18 @@ def load_sim_demos(
 
 
 def _episode_frames(ds: Any, ep_idx: int) -> list[dict[str, Any]]:
-    """Collect the rows of one episode from a LeRobotDataset."""
-    from_idx = ds.episode_data_index["from"][ep_idx].item()
-    to_idx = ds.episode_data_index["to"][ep_idx].item()
-    return [ds[i] for i in range(from_idx, to_idx)]
+    """Collect the rows of one episode from a LeRobotDataset.
+
+    lerobot 0.5.1 dropped ``episode_data_index``; frames are grouped by the
+    ``episode_index`` column of the underlying hf_dataset.
+    """
+    if getattr(ds, "episode_data_index", None) is not None:
+        from_idx = ds.episode_data_index["from"][ep_idx].item()
+        to_idx = ds.episode_data_index["to"][ep_idx].item()
+        return [ds[i] for i in range(from_idx, to_idx)]
+    ep_col = ds.hf_dataset["episode_index"]  # column -> list of ints
+    rng = [i for i, e in enumerate(ep_col) if int(e) == ep_idx]
+    return [ds[i] for i in rng]
 
 
 def _frames_to_stepdata(frames, image_size, camera_key, state_key, action_key) -> dict[str, np.ndarray]:
