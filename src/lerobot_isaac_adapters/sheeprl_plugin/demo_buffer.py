@@ -202,7 +202,9 @@ class DemoBuffer:
 # Behavior-cloning loss (DreamerFD: weight decays 1→0; "virtual clutch")
 # --------------------------------------------------------------------------- #
 def bc_weight(step: int, start: float = 1.0, decay_steps: int = 50_000) -> float:
-    """Linear BC-weight schedule 1.0 → 0.0 over decay_steps (DreamerFD)."""
+    """Linear BC-weight schedule start → 0.0 over decay_steps (DreamerFD)."""
+    if decay_steps <= 0:
+        return 0.0  # no schedule / guard div-by-zero
     if step >= decay_steps:
         return 0.0
     return float(start * (1.0 - step / decay_steps))
@@ -228,7 +230,8 @@ def behavior_cloning_loss(
     if kl is not None and kl > kl_clutch:
         w = 0.0
     if w == 0.0:
-        lp = actor_logprob(latents, demo_actions)
-        return torch.zeros((), device=lp.device if hasattr(lp, "device") else None)
+        # True fast-path: skip the actor forward pass entirely. The caller does
+        # not backward through a zero BC term, so device is irrelevant.
+        return torch.zeros((), dtype=torch.float32)
     logp = actor_logprob(latents, demo_actions)
     return -w * logp.mean()
