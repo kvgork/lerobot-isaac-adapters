@@ -218,6 +218,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default: %(default)s."
         ),
     )
+    # --- sheeprl exp selection (Plan2Explore / p2e_dv3) ------------------
+    parser.add_argument(
+        "--exp",
+        default=None,
+        metavar="EXP_NAME",
+        help=(
+            "sheeprl experiment config name passed as 'exp=<name>' to the "
+            "hydra composition (dreamerv3 backend only). Defaults to "
+            "'dreamer_v3'. Use 'p2e_dv3_exploration' for reward-free "
+            "Plan2Explore intrinsic-reward pre-training, or "
+            "'p2e_dv3_finetuning' to resume with extrinsic rewards. "
+            "The env var LEROBOT_ISAAC_EXP is also consulted when this flag "
+            "is not set. Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--exploration_ckpt",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Absolute path to a p2e_dv3_exploration checkpoint directory. "
+            "Required (or set via LEROBOT_ISAAC_EXPLORATION_CKPT env var) "
+            "when --exp p2e_dv3_finetuning is used and "
+            "'checkpoint.exploration_ckpt_path=' is not already present in "
+            "the remainder. Forwarded to sheeprl as "
+            "'checkpoint.exploration_ckpt_path=<path>'."
+        ),
+    )
     # Capture any extra args after '--' to forward to the backend
     parser.add_argument(
         "remainder",

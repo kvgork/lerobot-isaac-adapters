@@ -29,11 +29,29 @@ RTX 3080 10 GB notes
 - batch_size <= 16 initially; increase if VRAM allows.
 - Enable AMP (automatic mixed precision) if sheeprl supports it.
 - num_envs=1 for data collection replay.
+
+Plan2Explore (p2e_dv3) support
+-------------------------------
+Pass ``--exp p2e_dv3_exploration`` (reward-free intrinsic-reward pre-training)
+or ``--exp p2e_dv3_finetuning`` (resume exploration ckpt with extrinsic rewards)
+via ``args.exp`` (or env var ``LEROBOT_ISAAC_EXP``).  Both variants share the
+same env wiring and monkeypatches as ``dreamer_v3``.  The adapter resolves the
+exp name via: args.exp → LEROBOT_ISAAC_EXP → "dreamer_v3" (default).
+
+Double-exp guard: if a ``exp=`` token already exists in ``args.remainder`` the
+adapter suppresses emitting its own ``exp=`` to avoid hydra
+ConfigCompositionException on duplicate overrides.
+
+Finetuning ckpt guard: when ``exp_name`` ends with ``_finetuning`` the adapter
+requires a checkpoint path via ``args.exploration_ckpt`` or the env var
+``LEROBOT_ISAAC_EXPLORATION_CKPT``, unless ``checkpoint.exploration_ckpt_path=``
+is already present in ``args.remainder``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import sys
@@ -42,6 +60,42 @@ from pathlib import Path
 from lerobot_isaac_adapters.targets._subprocess import stream_training_subprocess
 
 _RECON_LOSS_RE = re.compile(r"recon_loss[=:\s]+([0-9.eE+\-]+)")
+
+# Path to the bundled sheeprl plugin configs directory.
+# Computed from __file__ to avoid importing sheeprl_plugin (which eagerly imports
+# gymnasium at module level and would break tests in environments without gymnasium).
+# Layout: targets/wm_dreamerv3.py → ../sheeprl_plugin/configs/
+_PLUGIN_CONFIGS_DIR = str(
+    Path(__file__).resolve().parent.parent / "sheeprl_plugin" / "configs"
+)
+
+
+def _resolve_exp_name(args: argparse.Namespace) -> str:
+    """Resolve the sheeprl exp= config name.
+
+    Priority order:
+    1. ``args.exp`` (CLI ``--exp`` flag)
+    2. ``LEROBOT_ISAAC_EXP`` environment variable
+    3. ``"dreamer_v3"`` (default — preserves full back-compat)
+    """
+    return (
+        getattr(args, "exp", None)
+        or os.environ.get("LEROBOT_ISAAC_EXP")
+        or "dreamer_v3"
+    )
+
+
+def _remainder_has_exp(remainder: list[str]) -> bool:
+    """Return True if any token in ``remainder`` starts with ``exp=``."""
+    return any(tok.startswith("exp=") for tok in (remainder or []))
+
+
+def _remainder_has_exploration_ckpt(remainder: list[str]) -> bool:
+    """Return True if ``checkpoint.exploration_ckpt_path=`` is in remainder."""
+    return any(
+        tok.startswith("checkpoint.exploration_ckpt_path=")
+        for tok in (remainder or [])
+    )
 
 
 def _convert_dataset(args: argparse.Namespace) -> Path:
@@ -106,15 +160,17 @@ def run(args: argparse.Namespace) -> int:
     args:
         Parsed CLI namespace from ``lerobot_isaac_adapters.train``.
         Expected attributes:
-          - ``dataset``    (str | None) — Parquet dir OR pre-converted HDF5 path
-          - ``config``     (str | None) — path to ``wm_dreamerv3.yaml``
-          - ``output_dir`` (str)
-          - ``steps``      (int)
-          - ``batch_size`` (int)
-          - ``lr``         (float)
-          - ``seed``       (int)
-          - ``dry_run``    (bool)
-          - ``remainder``  (list[str])
+          - ``dataset``          (str | None) — Parquet dir OR pre-converted HDF5 path
+          - ``config``           (str | None) — path to ``wm_dreamerv3.yaml``
+          - ``output_dir``       (str)
+          - ``steps``            (int)
+          - ``batch_size``       (int)
+          - ``lr``               (float)
+          - ``seed``             (int)
+          - ``dry_run``          (bool)
+          - ``exp``              (str | None) — sheeprl exp name; None → "dreamer_v3"
+          - ``exploration_ckpt`` (str | None) — path for p2e finetuning ckpt
+          - ``remainder``        (list[str])
 
     Returns
     -------
@@ -152,6 +208,32 @@ def run(args: argparse.Namespace) -> int:
     if args.dataset and args.dataset.endswith((".h5", ".hdf5")):
         hdf5_path = Path(args.dataset)
 
+    # Resolve exp name: --exp flag > LEROBOT_ISAAC_EXP env var > "dreamer_v3"
+    exp_name = _resolve_exp_name(args)
+
+    # Finetuning ckpt guard: p2e_dv3_finetuning requires a ckpt path.
+    remainder = list(getattr(args, "remainder", []) or [])
+    if exp_name.endswith("_finetuning") and not _remainder_has_exploration_ckpt(
+        remainder
+    ):
+        ckpt_path = getattr(args, "exploration_ckpt", None) or os.environ.get(
+            "LEROBOT_ISAAC_EXPLORATION_CKPT"
+        )
+        if ckpt_path:
+            remainder.append(
+                f"checkpoint.exploration_ckpt_path={Path(ckpt_path).resolve()}"
+            )
+        else:
+            msg = (
+                f"[wm_dreamerv3] ERROR: exp={exp_name!r} requires a checkpoint path.\n"
+                "  Provide it via one of:\n"
+                "    --exploration_ckpt /path/to/exploration/ckpt\n"
+                "    LEROBOT_ISAAC_EXPLORATION_CKPT=/path/to/exploration/ckpt\n"
+                "    -- checkpoint.exploration_ckpt_path=/path/to/exploration/ckpt"
+            )
+            print(msg, file=sys.stderr)
+            return 1
+
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
         # sheeprl entrypoint: `python -m sheeprl` (-> sheeprl/__main__.py).
         # `python -m sheeprl.cli` runs the module body but does NOT dispatch the
@@ -162,8 +244,10 @@ def run(args: argparse.Namespace) -> int:
         # which wraps `HDF5ReplayEnv` and feeds the bridge-produced HDF5
         # to sheeprl's dreamer_v3 directly. Override via remainder if you
         # have a different sheeprl env registered (`-- env=dmc`, etc.).
-        import lerobot_isaac_adapters.sheeprl_plugin as _plugin  # local import
-        plugin_configs = str(Path(_plugin.__file__).parent / "configs")
+        #
+        # _PLUGIN_CONFIGS_DIR is pre-computed from __file__ to avoid importing
+        # sheeprl_plugin (which has an eager `gymnasium` import that breaks tests
+        # in the default pixi env where gymnasium is not installed).
 
         if use_isaac_env:
             # Isaac Lab needs SimulationApp booted BEFORE sheeprl imports —
@@ -171,19 +255,32 @@ def run(args: argparse.Namespace) -> int:
             # and Isaac Sim's gpu_foundation plugin then fails to load.
             # Our `_wm_isaac_entry.py` claims libgobject via AppLauncher
             # before delegating to sheeprl.cli.run.
-            entry = Path(__file__).resolve().parents[3].parents[1] / "scripts" / "_wm_isaac_entry.py"
+            entry = (
+                Path(__file__).resolve().parents[3].parents[1]
+                / "scripts"
+                / "_wm_isaac_entry.py"
+            )
             # Fallback: resolve from workspace root in case file lives in
             # an installed site-packages copy.
             if not entry.is_file():
                 from os import environ
+
                 ws = Path(environ.get("LEROBOT_ISAAC_WORKSPACE", Path.cwd()))
                 entry = ws / "scripts" / "_wm_isaac_entry.py"
             cmd = [sys.executable, str(entry)]
         else:
             cmd = [sys.executable, "-m", "sheeprl"]
         cmd += [
-            f"--config-dir={plugin_configs}",
-            "exp=dreamer_v3",
+            f"--config-dir={_PLUGIN_CONFIGS_DIR}",
+        ]
+
+        # Double-exp guard: only emit our own exp= when the remainder does NOT
+        # already contain an exp= override (hydra raises ConfigCompositionException
+        # on duplicate overrides).
+        if not _remainder_has_exp(remainder):
+            cmd.append(f"exp={exp_name}")
+
+        cmd += [
             f"env={env_name}",
         ]
         if not use_isaac_env:
@@ -196,11 +293,12 @@ def run(args: argparse.Namespace) -> int:
             f"seed={args.seed}",
             f"hydra.run.dir={args.output_dir}",
         ]
-        if getattr(args, "remainder", None):
-            # Strip the synthetic `--env <name>` tokens we consumed above
-            # so they don't reach sheeprl as garbage.
+        # Append remainder (already has exploration_ckpt_path injected if needed),
+        # stripping the synthetic `--env <name>` tokens we consumed above
+        # so they don't reach sheeprl as garbage.
+        if remainder:
             skip = 0
-            for tok in args.remainder:
+            for tok in remainder:
                 if skip:
                     skip -= 1
                     continue
@@ -237,9 +335,7 @@ def run(args: argparse.Namespace) -> int:
             print(f"[wm_dreamerv3] Conversion error: {exc}", file=sys.stderr)
             return 1
     else:
-        print(
-            f"[wm_dreamerv3] env={env_name} — skipping HDF5 bridge step."
-        )
+        print(f"[wm_dreamerv3] env={env_name} — skipping HDF5 bridge step.")
 
     train_cmd = _build_train_cmd(hdf5_path)
 

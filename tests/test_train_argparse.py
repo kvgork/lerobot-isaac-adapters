@@ -399,3 +399,224 @@ class TestSuccessesOnlyFlag:
             ["--target_arch", "smolvla", "--successes_only"]
         )
         assert args.successes_only is True
+
+
+class TestP2eExpSelection:
+    """Plan2Explore exp= selection — p2e_dv3 MVP plumbing (spec 2026-06-22)."""
+
+    # ------------------------------------------------------------------
+    # (a) --exp p2e_dv3_exploration + --dry_run
+    # ------------------------------------------------------------------
+    def test_exp_p2e_exploration_in_cmd(self, capsys) -> None:
+        """--exp p2e_dv3_exploration → cmd contains exactly one exp=p2e_dv3_exploration,
+        zero exp=dreamer_v3."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--exp", "p2e_dv3_exploration",
+                "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "exp=p2e_dv3_exploration" in out, (
+            f"Expected 'exp=p2e_dv3_exploration' in dry-run output.\nstdout: {out!r}"
+        )
+        assert "exp=dreamer_v3" not in out, (
+            f"Unexpected 'exp=dreamer_v3' in dry-run output when --exp p2e_dv3_exploration set.\nstdout: {out!r}"
+        )
+        # Exactly one exp= token in the sheeprl cmd line
+        sheeprl_line = next(
+            (line for line in out.splitlines() if "sheeprl" in line), ""
+        )
+        exp_count = sheeprl_line.count("exp=")
+        assert exp_count == 1, (
+            f"Expected exactly 1 exp= in sheeprl cmd, got {exp_count}.\nLine: {sheeprl_line!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (b) default (no --exp, no env var) → exp=dreamer_v3 (back-compat)
+    # ------------------------------------------------------------------
+    def test_default_exp_is_dreamer_v3(self, capsys) -> None:
+        """No --exp and no env var → cmd emits exp=dreamer_v3 (unchanged)."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
+        env_backup = os.environ.pop("LEROBOT_ISAAC_EXP", None)
+        try:
+            rc = _dispatch(args)
+        finally:
+            if env_backup is not None:
+                os.environ["LEROBOT_ISAAC_EXP"] = env_backup
+        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "exp=dreamer_v3" in out, (
+            f"Expected 'exp=dreamer_v3' in default dry-run output.\nstdout: {out!r}"
+        )
+        assert "exp=p2e_dv3" not in out, (
+            f"Unexpected p2e exp= in default output.\nstdout: {out!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (c) LEROBOT_ISAAC_EXP env var (no --exp flag) → resolves to p2e
+    # ------------------------------------------------------------------
+    def test_env_var_exp_resolves(self, capsys, monkeypatch) -> None:
+        """LEROBOT_ISAAC_EXP=p2e_dv3_exploration (no --exp) → cmd has exp=p2e_dv3_exploration."""
+        monkeypatch.setenv("LEROBOT_ISAAC_EXP", "p2e_dv3_exploration")
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "exp=p2e_dv3_exploration" in out, (
+            f"Expected 'exp=p2e_dv3_exploration' via env var.\nstdout: {out!r}"
+        )
+        assert "exp=dreamer_v3" not in out
+
+    # ------------------------------------------------------------------
+    # (d) leading exp=foo in remainder → adapter suppresses its own exp=
+    # ------------------------------------------------------------------
+    def test_remainder_exp_suppresses_adapter_exp(self, capsys) -> None:
+        """exp=foo in remainder → adapter emits NO extra exp=; only one exp= in cmd."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--dry_run",
+                "--",
+                "exp=p2e_dv3_exploration",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        # The remainder exp= must appear exactly once — no duplicate from the adapter
+        assert out.count("exp=p2e_dv3_exploration") >= 1, (
+            f"Expected remainder exp= to pass through.\nstdout: {out!r}"
+        )
+        # There must NOT be an additional exp=dreamer_v3 injected by the adapter
+        assert "exp=dreamer_v3" not in out, (
+            f"Adapter incorrectly emitted exp=dreamer_v3 alongside remainder exp=.\nstdout: {out!r}"
+        )
+        # Total exp= count in the sheeprl cmd line must be exactly 1
+        sheeprl_line = next(
+            (line for line in out.splitlines() if "sheeprl" in line), ""
+        )
+        exp_count = sheeprl_line.count("exp=")
+        assert exp_count == 1, (
+            f"Expected exactly 1 exp= in sheeprl cmd (double-exp guard failed), "
+            f"got {exp_count}.\nLine: {sheeprl_line!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (e-i) --exp p2e_dv3_finetuning without ckpt → error (rc != 0)
+    # ------------------------------------------------------------------
+    def test_finetuning_without_ckpt_errors(self, capsys, monkeypatch) -> None:
+        """--exp p2e_dv3_finetuning without a ckpt source → returns non-zero."""
+        monkeypatch.delenv("LEROBOT_ISAAC_EXPLORATION_CKPT", raising=False)
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--exp", "p2e_dv3_finetuning",
+                "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc != 0, "Expected non-zero rc when finetuning ckpt is missing"
+        captured = capsys.readouterr()
+        combined = captured.out + captured.err
+        assert "finetuning" in combined.lower() or "exploration_ckpt" in combined.lower(), (
+            f"Expected error message mentioning finetuning/ckpt.\noutput: {combined!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (e-ii) --exp p2e_dv3_finetuning + --exploration_ckpt → appends ckpt_path
+    # ------------------------------------------------------------------
+    def test_finetuning_with_exploration_ckpt_flag(self, capsys, tmp_path) -> None:
+        """--exp p2e_dv3_finetuning + --exploration_ckpt /x/y.ckpt → ckpt_path in cmd."""
+        ckpt = tmp_path / "explore_ckpt"
+        ckpt.mkdir()
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--exp", "p2e_dv3_finetuning",
+                "--exploration_ckpt", str(ckpt),
+                "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0, f"Expected rc=0 with valid ckpt. stderr: {capsys.readouterr().err!r}"
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "checkpoint.exploration_ckpt_path=" in out, (
+            f"Expected 'checkpoint.exploration_ckpt_path=' in cmd.\nstdout: {out!r}"
+        )
+        assert "exp=p2e_dv3_finetuning" in out, (
+            f"Expected 'exp=p2e_dv3_finetuning' in cmd.\nstdout: {out!r}"
+        )
+
+    # ------------------------------------------------------------------
+    # (e-iii) --exp flag defaults to None (not set by default)
+    # ------------------------------------------------------------------
+    def test_exp_default_is_none(self) -> None:
+        """--exp defaults to None when not provided."""
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "dreamerv3"])
+        assert args.exp is None
+
+    # ------------------------------------------------------------------
+    # (e-iv) --exploration_ckpt flag defaults to None
+    # ------------------------------------------------------------------
+    def test_exploration_ckpt_default_is_none(self) -> None:
+        """--exploration_ckpt defaults to None when not provided."""
+        parser = _build_parser()
+        args = parser.parse_args(["--target_arch", "dreamerv3"])
+        assert args.exploration_ckpt is None
+
+    # ------------------------------------------------------------------
+    # (e-v) LEROBOT_ISAAC_EXPLORATION_CKPT env var used when no --exploration_ckpt
+    # ------------------------------------------------------------------
+    def test_finetuning_via_env_var_ckpt(self, capsys, monkeypatch, tmp_path) -> None:
+        """LEROBOT_ISAAC_EXPLORATION_CKPT used when --exploration_ckpt not passed."""
+        ckpt = tmp_path / "explore_env_ckpt"
+        ckpt.mkdir()
+        monkeypatch.setenv("LEROBOT_ISAAC_EXPLORATION_CKPT", str(ckpt))
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "dreamerv3",
+                "--dataset", "lerobot/pusht",
+                "--exp", "p2e_dv3_finetuning",
+                "--dry_run",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        captured = capsys.readouterr()
+        out = captured.out
+        assert "checkpoint.exploration_ckpt_path=" in out, (
+            f"Expected ckpt path in cmd via env var.\nstdout: {out!r}"
+        )
