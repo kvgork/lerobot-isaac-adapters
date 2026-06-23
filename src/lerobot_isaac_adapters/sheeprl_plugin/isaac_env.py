@@ -94,11 +94,13 @@ _STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
 _DIE_REST_Z = 0.05          # die resting height above table (object spawn z)
 _LIFT_MARGIN = 0.04         # die counts as "lifted" above rest+this
 _HOLD_TOL = 0.06            # ee↔die 3-D dist below which the die is deemed IN the gripper
-_OVER_OBJ_XY = 0.03         # ee within this planar dist of die ⇒ "over the object"
-_GRASP_DEPTH_MARGIN = 0.03  # ee below grasp_z+this ⇒ "at grasp depth"
-_BIN_XY_TOL = 0.04          # ee within this planar dist of bin ⇒ over the bin
-_BIN_DESCEND_Z = 0.085      # above this ee height over the bin ⇒ still descending
-_BIN_PLACE_Z = 0.06         # ee target height at the bin for descend/release
+_REACH_MAX = 0.30           # reach-envelope clamp on the grasp target (max planar reach ~0.346)
+_ALIGN_TOL = 0.015          # ee within this planar dist of the latched target ⇒ aligned
+_HIGH_MARGIN = 0.04         # ee above grasp_z+this ⇒ "high" (align here before descending)
+_GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
+_CLOSE_RAMP = 20            # steps over which the grip interpolates OPEN→CLOSE (cradle)
+_CLOSE_DWELL = 40           # total steps in CLOSE (ramp + firm hold) before lifting
+_LIFT_RATE = 0.012          # max ee z rise per step during LIFT (gradual, not a yank)
 
 
 class IsaacSO101Env(gym.Env):
@@ -196,6 +198,8 @@ class IsaacSO101Env(gym.Env):
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._t = 0
+        if getattr(self, "_script_ready", False):
+            self._script_reset_phase()  # new episode → restart the grasp phase machine
         # ManagerBasedRLEnv.reset returns (obs_dict, info_dict). obs_dict
         # is keyed by ObservationGroup name; we use "policy".
         raw_obs, raw_info = self._isaac_env.reset(seed=seed)
@@ -217,6 +221,10 @@ class IsaacSO101Env(gym.Env):
         # Isaac Lab tracks its own truncation; combine with the wrapper's
         # max_episode_steps cap so sheeprl's done-handling is correct.
         truncated = bool(self._scalar(raw_trunc)) or (self._t >= self.max_episode_steps)
+        # Isaac auto-resets a terminated/truncated env INSIDE step(), without calling the
+        # wrapper's reset() — so restart the grasp phase machine here for the next episode.
+        if (terminated or truncated) and getattr(self, "_script_ready", False):
+            self._script_reset_phase()
         return obs, reward, terminated, truncated, self._scalar_info(raw_info)
 
     # ------------------------------------------------------------------ #
@@ -277,6 +285,8 @@ class IsaacSO101Env(gym.Env):
             self._script_tgt_x = float(os.environ.get("LEROBOT_ISAAC_TARGET_X", "0.22"))
             self._script_tgt_y = float(os.environ.get("LEROBOT_ISAAC_TARGET_Y", "-0.13"))
             self._script_quat = [1.0, 0.0, 0.0, 0.0]  # straight-down grasp
+            # Hybrid phase-machine state (per episode): demo-ordered, state-gated.
+            self._script_reset_phase()
             self._script_ready = True
             logger.info("scripted-grasp controller initialised (residual RL base action)")
             return True
@@ -298,14 +308,24 @@ class IsaacSO101Env(gym.Env):
                 )
             return False
 
+    def _script_reset_phase(self) -> None:
+        """Reset the scripted-grasp phase machine for a new episode."""
+        self._script_phase = "APPROACH"
+        self._script_gx = None  # target xy, latched at APPROACH (reach-clamped)
+        self._script_gy = None
+        self._script_close_count = 0
+
     def compute_scripted_action(self) -> np.ndarray | None:
         """Return a (action_dim,) scripted-grasp action for the CURRENT pre-step state.
 
-        Reactive state-machine over {approach → descend → close → carry → place},
-        decided from live state (object height, ee↔object distance) rather than a
-        step-index sequence — so it produces a sensible base action at ANY RL step.
-        Same normalized action space as the policy (`(q_des-q_default)/0.5` for arm,
-        grip in [-1,1]) → directly blendable.
+        HYBRID phase machine — demo-ORDERED (APPROACH→DESCEND→CLOSE→LIFT, the proven
+        sequence from _gen_sim_demos) but STATE-GATED transitions (robust to the residual
+        clamp rate-limiting motion). Critically: it ALIGNS the ee over the object while
+        HIGH before descending vertically, and only closes after a dwell — so it does NOT
+        knock the (16 mm) die sideways the way a naive "close when xy<3cm" reactive
+        controller does (diagnosed by the GPU probe: that pushed the die out of reach).
+        Same normalized action space as the policy (`(q_des-q_default)/0.5` for arm, grip
+        in [-1,1]) → directly blendable. Phase state resets per episode (step()/reset()).
 
         Returns None when the Isaac scene is unavailable (hardware) or on any error
         → caller uses the pure policy action (residual weight effectively 0).
@@ -327,7 +347,6 @@ class IsaacSO101Env(gym.Env):
             qdef = self._script_qdef
             GRIP_OPEN, GRIP_CLOSE = 1.0, -1.0
             grasp_z, z_high = self._script_grasp_z, self._script_z_high
-            tgt_x, tgt_y = self._script_tgt_x, self._script_tgt_y
 
             # ---- live state (world frame; ee pose is a function of joint_pos, which is
             #      in the obs, and obj pose is in the obs when INCLUDE_OBJECT_POSE=1 —
@@ -337,32 +356,55 @@ class IsaacSO101Env(gym.Env):
             ox, oy, oz = float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2])
             ex, ey, ez = float(ee_pos_w[0]), float(ee_pos_w[1]), float(ee_pos_w[2])
 
-            ee_to_obj_3d = ((ex - ox) ** 2 + (ey - oy) ** 2 + (ez - oz) ** 2) ** 0.5
-            xy_to_obj = ((ex - ox) ** 2 + (ey - oy) ** 2) ** 0.5
-            xy_to_bin = ((ex - tgt_x) ** 2 + (ey - tgt_y) ** 2) ** 0.5
-            obj_lifted = oz > (_DIE_REST_Z + _LIFT_MARGIN)
-            # "holding" requires the die be lifted AND co-located with the ee (i.e. IN
-            # the gripper). Height alone would mis-fire if the die were knocked upward,
-            # making the script command an empty-gripper carry+release (false place).
-            holding = obj_lifted and ee_to_obj_3d < _HOLD_TOL
-            over_obj = xy_to_obj < _OVER_OBJ_XY
-            at_grasp_depth = ez < (grasp_z + _GRASP_DEPTH_MARGIN)
-
-            # ---- reactive phase → (target xyz, grip) ----
-            if holding:
-                # carry to bin, then descend + release
-                if xy_to_bin > _BIN_XY_TOL:
-                    target, grip = [tgt_x, tgt_y, z_high], GRIP_CLOSE
-                elif ez > _BIN_DESCEND_Z:
-                    target, grip = [tgt_x, tgt_y, _BIN_PLACE_Z], GRIP_CLOSE
+            # Latch the grasp target xy at episode start, REACH-CLAMPED so the arm never
+            # chases a die that has been pushed out of the envelope (probe failure mode).
+            if self._script_gx is None:
+                r = (ox * ox + oy * oy) ** 0.5
+                if r > _REACH_MAX and r > 1e-6:
+                    s = _REACH_MAX / r
+                    self._script_gx, self._script_gy = ox * s, oy * s
                 else:
-                    target, grip = [tgt_x, tgt_y, _BIN_PLACE_Z], GRIP_OPEN  # release
-            elif over_obj and at_grasp_depth:
-                target, grip = [ox, oy, grasp_z], GRIP_CLOSE        # close on the die
-            elif over_obj:
-                target, grip = [ox, oy, grasp_z], GRIP_OPEN         # descend to grasp
-            else:
-                target, grip = [ox, oy, z_high], GRIP_OPEN          # approach above die
+                    self._script_gx, self._script_gy = ox, oy
+            gx, gy = self._script_gx, self._script_gy
+
+            xy_to_tgt = ((ex - gx) ** 2 + (ey - gy) ** 2) ** 0.5
+            ee_to_obj_3d = ((ex - ox) ** 2 + (ey - oy) ** 2 + (ez - oz) ** 2) ** 0.5
+            obj_lifted = oz > (_DIE_REST_Z + _LIFT_MARGIN)
+            aligned = xy_to_tgt < _ALIGN_TOL          # tight: < die half-width, so close
+            ee_high = ez > (grasp_z + _HIGH_MARGIN)   #        doesn't knock the die
+            at_depth = ez < (grasp_z + _GRASP_DEPTH_MARGIN)
+
+            # ---- hybrid phase machine (demo-ordered, state-gated) ----
+            ph = self._script_phase
+            if ph == "APPROACH":
+                # align over the die while HIGH (open), then descend
+                target, grip = [gx, gy, z_high], GRIP_OPEN
+                if aligned and ee_high:
+                    self._script_phase = "DESCEND"
+            elif ph == "DESCEND":
+                target, grip = [gx, gy, grasp_z], GRIP_OPEN
+                if not aligned and ee_high:
+                    self._script_phase = "APPROACH"        # lost alignment up high → re-align
+                elif at_depth:
+                    self._script_phase = "CLOSE"
+            elif ph == "CLOSE":
+                self._script_close_count += 1
+                # GRADUAL close (cradle the die) like the demo's interpolated 80-step
+                # close, then hold firmly — an instant full close ejects/slips the die.
+                frac = min(1.0, self._script_close_count / _CLOSE_RAMP)
+                grip = GRIP_OPEN + (GRIP_CLOSE - GRIP_OPEN) * frac  # 1.0 → -1.0
+                target = [gx, gy, grasp_z]
+                if self._script_close_count >= _CLOSE_DWELL:
+                    self._script_phase = "LIFT"
+            else:  # LIFT — raise GRADUALLY (a fast yank to z_high breaks the grip;
+                   # the demo lifts over ~60 steps). For GRASP_STAGE lift_termination
+                   # fires once the die is held above threshold.
+                lift_z = min(z_high, ez + _LIFT_RATE)
+                target, grip = [gx, gy, lift_z], GRIP_CLOSE
+                # if we've lifted clear of grasp depth but the die didn't come with us
+                # (not captured), drop back and re-grasp
+                if not obj_lifted and ee_to_obj_3d > _HOLD_TOL and ez > grasp_z + 0.03:
+                    self._script_reset_phase()
 
             # ---- IK (transcribed from _gen_sim_demos.step_to) ----
             self._script_ik.reset()
