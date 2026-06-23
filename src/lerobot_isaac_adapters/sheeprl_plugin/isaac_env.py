@@ -50,6 +50,16 @@ WARM_UP_FRAMES = 30
 # `RuntimeError: Simulation context already exists`.
 _GLOBAL_BACKING_ISAAC_ENV: Any = None
 
+# Module global pointing at the most-recently-booted IsaacSO101Env WRAPPER instance
+# (distinct from `_GLOBAL_BACKING_ISAAC_ENV`, which is the backing ManagerBasedRLEnv).
+# The residual-RL patch in `scripts/_wm_isaac_entry.py` reads this to call
+# `compute_scripted_action()` from inside the patched PlayerDV3.get_actions seam — the
+# only place where the scripted base action can be both recorded to the buffer AND
+# executed (see memory `sheeprl-action-override-buffer-seam`). Training boots its
+# wrapper first; the eval wrapper (if any) overwrites this, but residual is skipped on
+# greedy/eval actions, so the train wrapper is always the one used during training.
+_LAST_WRAPPER: Any = None
+
 # Default obs key set the wrapper exposes to sheeprl. The Isaac Lab env's
 # `policy` ObservationGroup must include a `joint_pos`-style term (mapped
 # to `state`) AND a camera term (mapped to `rgb`). Camera wiring lives in
@@ -75,6 +85,20 @@ _INCLUDE_OBJECT_POSE = os.environ.get("LEROBOT_ISAAC_INCLUDE_OBJECT_POSE", "0") 
 )
 _STATE_DIM_BASE = 6  # joint_pos (6-DOF)
 _STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
+
+# --- Reactive scripted-grasp controller thresholds (residual RL; see
+#     compute_scripted_action). All in metres, in the world frame. Tuned to the
+#     pick_and_place scene geometry (die rest z≈0.05, grasp_z≈0.106, z_high≈0.17 —
+#     same waypoints as scripts/_gen_sim_demos.py). GPU-validation pending: these gate
+#     phase selection, so a wrong value mis-sequences the controller.
+_DIE_REST_Z = 0.05          # die resting height above table (object spawn z)
+_LIFT_MARGIN = 0.04         # die counts as "lifted" above rest+this
+_HOLD_TOL = 0.06            # ee↔die 3-D dist below which the die is deemed IN the gripper
+_OVER_OBJ_XY = 0.03         # ee within this planar dist of die ⇒ "over the object"
+_GRASP_DEPTH_MARGIN = 0.03  # ee below grasp_z+this ⇒ "at grasp depth"
+_BIN_XY_TOL = 0.04          # ee within this planar dist of bin ⇒ over the bin
+_BIN_DESCEND_Z = 0.085      # above this ee height over the bin ⇒ still descending
+_BIN_PLACE_Z = 0.06         # ee target height at the bin for descend/release
 
 
 class IsaacSO101Env(gym.Env):
@@ -195,6 +219,179 @@ class IsaacSO101Env(gym.Env):
         truncated = bool(self._scalar(raw_trunc)) or (self._t >= self.max_episode_steps)
         return obs, reward, terminated, truncated, self._scalar_info(raw_info)
 
+    # ------------------------------------------------------------------ #
+    # residual RL: scripted-grasp base action (sim-only)
+    # ------------------------------------------------------------------ #
+
+    def _init_script_controller(self) -> bool:
+        """Lazy-init the DifferentialIK scripted-grasp controller. Idempotent.
+
+        The IK MATH (entity names, joint indices, jacobian slicing, IK cfg, the
+        `(q_des-q_default)/0.5` normalization) is transcribed faithfully from
+        `scripts/_gen_sim_demos.py`'s physics-verified grasp. NOTE: the SEQUENCING is
+        NOT identical — _gen_sim_demos runs a fixed open-loop phase schedule, whereas
+        compute_scripted_action is a REACTIVE state-machine (phase inferred from live
+        state) so it can produce a base action at any RL step. Returns True if ready,
+        False if the Isaac scene is unavailable (e.g. hardware) → caller falls back to
+        pure policy. Retries a few times before latching OFF, so a transient
+        scene-not-ready does not permanently disable the residual.
+        """
+        if getattr(self, "_script_ready", False):
+            return True
+        if self._isaac_env is None or not hasattr(self._isaac_env, "scene"):
+            return False
+        try:
+            import torch  # noqa: F401
+            from isaaclab.controllers import (  # type: ignore[import]
+                DifferentialIKController,
+                DifferentialIKControllerCfg,
+            )
+
+            scene = self._isaac_env.scene
+            robot = scene["robot"]
+            self._script_robot = robot
+            self._script_obj = scene["source_object"]
+            self._script_dev = self._isaac_env.device
+            self._script_ee_idx = int(robot.find_bodies("gripper_link")[0][0])
+            self._script_arm_ids = list(
+                robot.find_joints(
+                    ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+                )[0]
+            )
+            self._script_grip_idx = int(robot.find_joints("gripper")[0][0])
+            _fixed = bool(getattr(robot, "is_fixed_base", True))
+            self._script_ee_jac = (self._script_ee_idx - 1) if _fixed else self._script_ee_idx
+            self._script_jac_off = 0 if _fixed else 6
+            self._script_qdef = robot.data.default_joint_pos.clone()
+            self._script_adim = int(self._isaac_env.action_space.shape[-1])
+            self._script_ik = DifferentialIKController(
+                DifferentialIKControllerCfg(
+                    command_type="pose", use_relative_mode=False, ik_method="dls"
+                ),
+                num_envs=1,
+                device=self._script_dev,
+            )
+            # Waypoint constants — same as _gen_sim_demos.py defaults.
+            self._script_grasp_z = float(os.environ.get("LEROBOT_ISAAC_GRASP_Z", "0.106"))
+            self._script_z_high = float(os.environ.get("LEROBOT_ISAAC_SCRIPT_Z_HIGH", "0.17"))
+            self._script_tgt_x = float(os.environ.get("LEROBOT_ISAAC_TARGET_X", "0.22"))
+            self._script_tgt_y = float(os.environ.get("LEROBOT_ISAAC_TARGET_Y", "-0.13"))
+            self._script_quat = [1.0, 0.0, 0.0, 0.0]  # straight-down grasp
+            self._script_ready = True
+            logger.info("scripted-grasp controller initialised (residual RL base action)")
+            return True
+        except Exception as exc:  # noqa: BLE001 — never let init break the run
+            self._script_ready = False
+            self._script_init_attempts = getattr(self, "_script_init_attempts", 0) + 1
+            if self._script_init_attempts >= 3:
+                # Latch OFF only after repeated failure (not a transient scene-not-ready).
+                logger.error(
+                    "scripted-grasp controller init failed %d× — residual DISABLED for "
+                    "the rest of this run: %s",
+                    self._script_init_attempts, exc,
+                )
+                self._script_init_failed = True
+            else:
+                logger.warning(
+                    "scripted-grasp controller init failed (attempt %d/3, will retry): %s",
+                    self._script_init_attempts, exc,
+                )
+            return False
+
+    def compute_scripted_action(self) -> np.ndarray | None:
+        """Return a (action_dim,) scripted-grasp action for the CURRENT pre-step state.
+
+        Reactive state-machine over {approach → descend → close → carry → place},
+        decided from live state (object height, ee↔object distance) rather than a
+        step-index sequence — so it produces a sensible base action at ANY RL step.
+        Same normalized action space as the policy (`(q_des-q_default)/0.5` for arm,
+        grip in [-1,1]) → directly blendable.
+
+        Returns None when the Isaac scene is unavailable (hardware) or on any error
+        → caller uses the pure policy action (residual weight effectively 0).
+        """
+        if getattr(self, "_script_init_failed", False):
+            return None
+        if not self._init_script_controller():
+            return None
+        try:
+            import torch
+            from isaaclab.utils.math import subtract_frame_transforms  # type: ignore[import]
+
+            robot = self._script_robot
+            obj = self._script_obj
+            dev = self._script_dev
+            ee_idx = self._script_ee_idx
+            arm_ids = self._script_arm_ids
+            grip_idx = self._script_grip_idx
+            qdef = self._script_qdef
+            GRIP_OPEN, GRIP_CLOSE = 1.0, -1.0
+            grasp_z, z_high = self._script_grasp_z, self._script_z_high
+            tgt_x, tgt_y = self._script_tgt_x, self._script_tgt_y
+
+            # ---- live state (world frame; ee pose is a function of joint_pos, which is
+            #      in the obs, and obj pose is in the obs when INCLUDE_OBJECT_POSE=1 —
+            #      so the scripted action is reproducible by the actor) ----
+            obj_pos = obj.data.root_pos_w[0]                       # (3,) world
+            ee_pos_w = robot.data.body_pos_w[0, ee_idx, :]         # (3,) world
+            ox, oy, oz = float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2])
+            ex, ey, ez = float(ee_pos_w[0]), float(ee_pos_w[1]), float(ee_pos_w[2])
+
+            ee_to_obj_3d = ((ex - ox) ** 2 + (ey - oy) ** 2 + (ez - oz) ** 2) ** 0.5
+            xy_to_obj = ((ex - ox) ** 2 + (ey - oy) ** 2) ** 0.5
+            xy_to_bin = ((ex - tgt_x) ** 2 + (ey - tgt_y) ** 2) ** 0.5
+            obj_lifted = oz > (_DIE_REST_Z + _LIFT_MARGIN)
+            # "holding" requires the die be lifted AND co-located with the ee (i.e. IN
+            # the gripper). Height alone would mis-fire if the die were knocked upward,
+            # making the script command an empty-gripper carry+release (false place).
+            holding = obj_lifted and ee_to_obj_3d < _HOLD_TOL
+            over_obj = xy_to_obj < _OVER_OBJ_XY
+            at_grasp_depth = ez < (grasp_z + _GRASP_DEPTH_MARGIN)
+
+            # ---- reactive phase → (target xyz, grip) ----
+            if holding:
+                # carry to bin, then descend + release
+                if xy_to_bin > _BIN_XY_TOL:
+                    target, grip = [tgt_x, tgt_y, z_high], GRIP_CLOSE
+                elif ez > _BIN_DESCEND_Z:
+                    target, grip = [tgt_x, tgt_y, _BIN_PLACE_Z], GRIP_CLOSE
+                else:
+                    target, grip = [tgt_x, tgt_y, _BIN_PLACE_Z], GRIP_OPEN  # release
+            elif over_obj and at_grasp_depth:
+                target, grip = [ox, oy, grasp_z], GRIP_CLOSE        # close on the die
+            elif over_obj:
+                target, grip = [ox, oy, grasp_z], GRIP_OPEN         # descend to grasp
+            else:
+                target, grip = [ox, oy, z_high], GRIP_OPEN          # approach above die
+
+            # ---- IK (transcribed from _gen_sim_demos.step_to) ----
+            self._script_ik.reset()
+            cmd = torch.tensor([target + self._script_quat], device=dev, dtype=torch.float32)
+            rp, rq = robot.data.root_pos_w, robot.data.root_quat_w
+            pos_b, quat_b = subtract_frame_transforms(
+                rp, rq, robot.data.body_pos_w[:, ee_idx, :], robot.data.body_quat_w[:, ee_idx, :]
+            )
+            self._script_ik.set_command(cmd, ee_pos=pos_b, ee_quat=quat_b)
+            jac = robot.root_physx_view.get_jacobians()[
+                :, self._script_ee_jac, :6, [self._script_jac_off + j for j in arm_ids]
+            ]
+            q_des = self._script_ik.compute(pos_b, quat_b, jac, robot.data.joint_pos[:, arm_ids])
+            action = torch.zeros((1, self._script_adim), device=dev)
+            for k, jid in enumerate(arm_ids):
+                action[0, jid] = (q_des[0, k] - qdef[0, jid]) / 0.5
+            action[0, grip_idx] = grip
+            return action[0].detach().cpu().numpy().astype(np.float32)
+        except Exception as exc:  # noqa: BLE001
+            n = getattr(self, "_script_warn_count", 0) + 1
+            self._script_warn_count = n
+            if n <= 3:
+                logger.warning(
+                    "compute_scripted_action failed (residual skipped this step; "
+                    "warning %d, further suppressed): %s",
+                    n, exc,
+                )
+            return None
+
     def render(self) -> np.ndarray:
         # Return HWC for sheeprl's RecordVideoV0 wrapper.
         return self._last_rgb_hwc.copy() if hasattr(self, "_last_rgb_hwc") else (
@@ -310,6 +507,14 @@ class IsaacSO101Env(gym.Env):
         # Eager flag: warm-up below is best-effort; if it throws we must
         # NOT re-enter _boot() and re-create the SimulationContext.
         self._booted = True
+        # Publish this wrapper for the residual-RL patch (reads the backing scene via
+        # compute_scripted_action). ONLY when residual is enabled — otherwise this is a
+        # true no-op for the 99% of runs that don't use it (no module-scope reference
+        # held). Last-booted wins; the train wrapper boots first, the eval wrapper (if
+        # any) boots later but the patch skips eval via the _in_eval guard.
+        if float(os.environ.get("LEROBOT_ISAAC_RESIDUAL_RL_WEIGHT", "0.0") or "0.0") > 0.0:
+            global _LAST_WRAPPER
+            _LAST_WRAPPER = self
 
         # 30-frame warm-up so camera buffers are populated. Use the env's
         # sim handle; fall back to no-op if not exposed.
