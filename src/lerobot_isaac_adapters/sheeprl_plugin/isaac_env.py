@@ -98,8 +98,9 @@ _REACH_MAX = 0.30           # reach-envelope clamp on the grasp target (max plan
 _ALIGN_TOL = 0.015          # ee within this planar dist of the latched target ⇒ aligned
 _HIGH_MARGIN = 0.04         # ee above grasp_z+this ⇒ "high" (align here before descending)
 _GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
-_CLOSE_RAMP = 20            # steps over which the grip interpolates OPEN→CLOSE (cradle)
-_CLOSE_DWELL = 40           # total steps in CLOSE (ramp + firm hold) before lifting
+_STABILIZE_STEPS = 20       # steps to settle (gripper OPEN) at grasp depth before closing
+_CLOSE_RAMP = 40            # steps over which the grip interpolates OPEN→CLOSE (slow cradle)
+_CLOSE_DWELL = 60           # total steps in CLOSE (ramp + firm hold) before lifting
 _LIFT_RATE = 0.012          # max ee z rise per step during LIFT (gradual, not a yank)
 
 
@@ -386,6 +387,15 @@ class IsaacSO101Env(gym.Env):
                 if not aligned and ee_high:
                     self._script_phase = "APPROACH"        # lost alignment up high → re-align
                 elif at_depth:
+                    self._script_phase = "STABILIZE"
+            elif ph == "STABILIZE":
+                # settle at grasp depth with the gripper OPEN so the die sits BETWEEN the
+                # fingers before closing (the demo's 30-step stabilize — without it the
+                # fingers close beside/above the die and it slips out on lift).
+                target, grip = [gx, gy, grasp_z], GRIP_OPEN
+                self._script_close_count += 1
+                if self._script_close_count >= _STABILIZE_STEPS:
+                    self._script_close_count = 0
                     self._script_phase = "CLOSE"
             elif ph == "CLOSE":
                 self._script_close_count += 1
