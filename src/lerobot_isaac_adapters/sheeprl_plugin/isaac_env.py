@@ -203,7 +203,20 @@ class IsaacSO101Env(gym.Env):
             self._script_reset_phase()  # new episode → restart the grasp phase machine
         # ManagerBasedRLEnv.reset returns (obs_dict, info_dict). obs_dict
         # is keyed by ObservationGroup name; we use "policy".
-        raw_obs, raw_info = self._isaac_env.reset(seed=seed)
+        # inference_mode(False) guard: sheeprl wraps its env-collection loop in
+        # torch.inference_mode() (dreamer_v3.py:553), and any in-step DR auto-reset runs
+        # inside it. Isaac Lab's DR reset event terms (reset_root_state_uniform /
+        # reset_joints_by_scale) write randomized state into the sim physics buffers
+        # IN-PLACE, which raises "RuntimeError: Inference tensors cannot be ..." when done
+        # under inference_mode. Disabling it here lets the DR buffer writes succeed and is
+        # a no-op when grad mode is already normal.
+        # NOTE: not yet GPU-verified — confirm against the actual traceback before relying
+        # on it. (sheeprl test() uses @torch.no_grad(), which does NOT create inference
+        # tensors, so the trigger is the training-collection inference_mode, not eval.)
+        import torch
+
+        with torch.inference_mode(False):
+            raw_obs, raw_info = self._isaac_env.reset(seed=seed)
         return self._translate_obs(raw_obs), self._scalar_info(raw_info)
 
     def step(
@@ -215,7 +228,15 @@ class IsaacSO101Env(gym.Env):
         # ManagerBasedRLEnv expects action shape (num_envs, action_dim).
         # We're single-env → add batch dim; cast to torch on device.
         action_t = self._to_torch(action).view(self.num_envs, -1)
-        raw_obs, raw_reward, raw_term, raw_trunc, raw_info = self._isaac_env.step(action_t)
+        # inference_mode(False) guard: see reset(). Isaac auto-resets a terminated/
+        # truncated env INSIDE step() (below), firing the DR reset event terms whose
+        # in-place sim-buffer writes raise "Inference tensors cannot be ..." under the
+        # inference_mode that wraps sheeprl's collection loop (dreamer_v3.py:553). No-op
+        # when grad mode is already on. (Not yet GPU-verified — confirm via traceback.)
+        import torch
+
+        with torch.inference_mode(False):
+            raw_obs, raw_reward, raw_term, raw_trunc, raw_info = self._isaac_env.step(action_t)
         obs = self._translate_obs(raw_obs)
         reward = float(self._scalar(raw_reward))
         terminated = bool(self._scalar(raw_term))

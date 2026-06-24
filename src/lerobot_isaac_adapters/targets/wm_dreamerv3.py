@@ -98,6 +98,54 @@ def _remainder_has_exploration_ckpt(remainder: list[str]) -> bool:
     )
 
 
+def _remainder_has_resume_from(remainder: list[str]) -> bool:
+    """Return True if ``checkpoint.resume_from=`` is in remainder."""
+    return any(
+        tok.startswith("checkpoint.resume_from=") for tok in (remainder or [])
+    )
+
+
+def _parse_image_size(raw: str | None) -> tuple[int, int]:
+    """Parse the ``--image_size`` flag into an ``(H, W)`` tuple.
+
+    Accepts a single int ``"64"`` -> ``(64, 64)`` or ``"H,W"`` -> ``(H, W)``.
+    Returns the DreamerV3 default ``(64, 64)`` when ``raw`` is None/empty.
+    """
+    if not raw:
+        return (64, 64)
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if len(parts) == 1:
+        n = int(parts[0])
+        return (n, n)
+    if len(parts) == 2:
+        return (int(parts[0]), int(parts[1]))
+    raise ValueError(
+        f"--image_size must be 'N' or 'H,W'; got {raw!r}"
+    )
+
+
+def _resolve_bridge_kwargs(args: argparse.Namespace) -> dict:
+    """Build the optional image/state-key + image_size kwargs for the bridge.
+
+    Purely additive: when none of ``--camera_key`` / ``--state_keys`` /
+    ``--image_size`` are set the bridge sees ``image_keys=None`` (auto-detect),
+    ``state_keys=None`` (auto-detect) and ``image_size=(64, 64)`` — identical
+    to the prior hard-coded behaviour.
+    """
+    camera_key = getattr(args, "camera_key", None)
+    state_keys_raw = getattr(args, "state_keys", None)
+    state_keys = (
+        [s.strip() for s in str(state_keys_raw).split(",") if s.strip()]
+        if state_keys_raw
+        else None
+    )
+    return {
+        "image_size": _parse_image_size(getattr(args, "image_size", None)),
+        "image_keys": [camera_key] if camera_key else None,
+        "state_keys": state_keys,
+    }
+
+
 def _convert_dataset(args: argparse.Namespace) -> Path:
     """Convert LeRobotDataset to DreamerV3 HDF5 format.
 
@@ -131,19 +179,20 @@ def _convert_dataset(args: argparse.Namespace) -> Path:
             "  export PYTHONPATH=${CLAUDE_CODE_ROOT}:$PYTHONPATH"
         )
 
+    bridge_kwargs = _resolve_bridge_kwargs(args)
     print(
         f"[wm_dreamerv3] Converting dataset {args.dataset!r} "
-        f"-> {hdf5_path} (64x64, HDF5)..."
+        f"-> {hdf5_path} ({bridge_kwargs['image_size']}, HDF5)..."
     )
     hdf5_path.parent.mkdir(parents=True, exist_ok=True)
     result = lerobot_to_worldmodel(
         dataset_path=args.dataset or "",
         output_path=str(hdf5_path),
         output_format="hdf5",
-        image_size=(64, 64),
         window_size=16,
         stride=8,
         normalize_actions=True,
+        **bridge_kwargs,
     )
     if not result.success:
         raise RuntimeError(f"[wm_dreamerv3] Dataset conversion failed: {result.error}")
@@ -234,6 +283,18 @@ def run(args: argparse.Namespace) -> int:
             print(msg, file=sys.stderr)
             return 1
 
+    # Native sheeprl resume (any exp): append checkpoint.resume_from=<path>.
+    # Distinct from the _finetuning exploration_ckpt_path branch above —
+    # resume_from rehydrates a full sheeprl run state (sheeprl/cli.py:362).
+    if not _remainder_has_resume_from(remainder):
+        resume_from = getattr(args, "resume_from", None) or os.environ.get(
+            "LEROBOT_ISAAC_RESUME_FROM"
+        )
+        if resume_from:
+            remainder.append(
+                f"checkpoint.resume_from={Path(resume_from).resolve()}"
+            )
+
     def _build_train_cmd(resolved_hdf5: Path) -> list[str]:
         # sheeprl entrypoint: `python -m sheeprl` (-> sheeprl/__main__.py).
         # `python -m sheeprl.cli` runs the module body but does NOT dispatch the
@@ -318,9 +379,17 @@ def run(args: argparse.Namespace) -> int:
                 f"actor will learn against live physics + RewardManager."
             )
         elif not (args.dataset and args.dataset.endswith((".h5", ".hdf5"))):
+            _bk = _resolve_bridge_kwargs(args)
+            _extra = []
+            if _bk["image_keys"]:
+                _extra.append(f"image_keys={_bk['image_keys']}")
+            if _bk["state_keys"]:
+                _extra.append(f"state_keys={_bk['state_keys']}")
+            _extra_s = (" " + " ".join(_extra)) if _extra else ""
             print(
                 f"[wm_dreamerv3] Step 1 — convert dataset (via lerobot_world_model_bridge Python API):\n"
-                f"  dataset={args.dataset!r} -> {hdf5_path} (64x64 HDF5)"
+                f"  dataset={args.dataset!r} -> {hdf5_path} "
+                f"({_bk['image_size']} HDF5){_extra_s}"
             )
         else:
             print(f"[wm_dreamerv3] Step 1 — pre-converted HDF5: {hdf5_path}")

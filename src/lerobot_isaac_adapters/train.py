@@ -246,6 +246,53 @@ def _build_parser() -> argparse.ArgumentParser:
             "'checkpoint.exploration_ckpt_path=<path>'."
         ),
     )
+    parser.add_argument(
+        "--resume_from",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Resume a sheeprl world-model run from a checkpoint (dreamerv3 "
+            "backend only). Forwarded to sheeprl as "
+            "'checkpoint.resume_from=<path>' for ANY exp (native sheeprl "
+            "resume). The env var LEROBOT_ISAAC_RESUME_FROM is also consulted "
+            "when this flag is not set. Distinct from --exploration_ckpt, which "
+            "is the Plan2Explore finetuning-only exploration weight path. "
+            "Ignored by policy backends."
+        ),
+    )
+    # --- world-model bridge conversion overrides (dreamerv3 backend) ------
+    parser.add_argument(
+        "--camera_key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Dataset image-observation key to convert (dreamerv3 backend "
+            "only), e.g. 'observation.images.overhead'. Forwarded to the "
+            "world-model bridge as image_keys=[<key>]. If omitted, the bridge "
+            "auto-detects the image key(s). Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--state_keys",
+        default=None,
+        metavar="KEY1,KEY2,...",
+        help=(
+            "Comma-separated dataset state-observation keys to convert "
+            "(dreamerv3 backend only), e.g. 'observation.state'. Forwarded to "
+            "the world-model bridge as state_keys=[...]. If omitted, the bridge "
+            "auto-detects the state key(s). Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--image_size",
+        default=None,
+        metavar="N | H,W",
+        help=(
+            "Override the world-model bridge image size (dreamerv3 backend "
+            "only). Either a single int N giving an (N, N) square, or 'H,W'. "
+            "If omitted, defaults to 64,64. Ignored by policy backends."
+        ),
+    )
     # Capture any extra args after '--' to forward to the backend
     parser.add_argument(
         "remainder",
