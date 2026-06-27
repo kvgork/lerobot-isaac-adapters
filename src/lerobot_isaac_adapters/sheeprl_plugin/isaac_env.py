@@ -102,6 +102,14 @@ _STABILIZE_STEPS = 20       # steps to settle (gripper OPEN) at grasp depth befo
 _CLOSE_RAMP = 40            # steps over which the grip interpolates OPEN→CLOSE (slow cradle)
 _CLOSE_DWELL = 60           # total steps in CLOSE (ramp + firm hold) before lifting
 _LIFT_RATE = 0.012          # max ee z rise per step during LIFT (gradual, not a yank)
+# --- carry+place phases (extend the residual base from grasp+lift to the FULL pick-place,
+#     mirroring scripts/_gen_sim_demos.py: CARRY→LOWER→RELEASE. Without these the scripted
+#     base only grasps+lifts and the residual RL must discover carry+place from scratch — the
+#     exact wall it never breaks (S3 run 2026-06-27: reward climbed but ep_len_avg stayed 300,
+#     0 places). With them the base places ~the scripted rate and RL only refines it.)
+_PLACE_Z = 0.06             # ee z over the bin at release (die lands in the cup); matches demo-gen
+_CARRY_TOL = 0.03           # ee planar dist to bin centre ⇒ over the bin, start lowering
+_RELEASE_RAMP = 50          # steps to GRADUALLY open at the bin (avoid ejecting the die on release)
 
 
 class IsaacSO101Env(gym.Env):
@@ -427,15 +435,37 @@ class IsaacSO101Env(gym.Env):
                 target = [gx, gy, grasp_z]
                 if self._script_close_count >= _CLOSE_DWELL:
                     self._script_phase = "LIFT"
-            else:  # LIFT — raise GRADUALLY (a fast yank to z_high breaks the grip;
-                   # the demo lifts over ~60 steps). For GRASP_STAGE lift_termination
-                   # fires once the die is held above threshold.
+            elif ph == "LIFT":  # raise GRADUALLY (a fast yank to z_high breaks the grip;
+                   # the demo lifts over ~60 steps), then CARRY to the bin once high+held.
                 lift_z = min(z_high, ez + _LIFT_RATE)
                 target, grip = [gx, gy, lift_z], GRIP_CLOSE
                 # if we've lifted clear of grasp depth but the die didn't come with us
                 # (not captured), drop back and re-grasp
                 if not obj_lifted and ee_to_obj_3d > _HOLD_TOL and ez > grasp_z + 0.03:
                     self._script_reset_phase()
+                elif obj_lifted and ez > z_high - 0.01:  # lifted to carry height → carry to bin
+                    self._script_phase = "CARRY"
+            elif ph == "CARRY":  # move (held, high) to over the bin, then LOWER
+                tx, ty = self._script_tgt_x, self._script_tgt_y
+                target, grip = [tx, ty, z_high], GRIP_CLOSE
+                xy_to_bin = ((ex - tx) ** 2 + (ey - ty) ** 2) ** 0.5
+                if not obj_lifted and ee_to_obj_3d > _HOLD_TOL:  # dropped mid-carry → re-grasp
+                    self._script_reset_phase()
+                elif xy_to_bin < _CARRY_TOL:                     # over the bin → lower in
+                    self._script_phase = "LOWER"
+            elif ph == "LOWER":  # descend over the bin to release depth, gripper still closed
+                tx, ty = self._script_tgt_x, self._script_tgt_y
+                target, grip = [tx, ty, _PLACE_Z], GRIP_CLOSE
+                if ez < _PLACE_Z + _GRASP_DEPTH_MARGIN:          # at release depth → release
+                    self._script_close_count = 0
+                    self._script_phase = "RELEASE"
+            else:  # RELEASE — GRADUAL open at the bin to drop the die in (instant open ejects it),
+                   # then hold open low so the place predicate (resting + released) latches.
+                tx, ty = self._script_tgt_x, self._script_tgt_y
+                self._script_close_count += 1
+                frac = min(1.0, self._script_close_count / _RELEASE_RAMP)
+                grip = GRIP_CLOSE + (GRIP_OPEN - GRIP_CLOSE) * frac  # -1.0 → 1.0
+                target = [tx, ty, _PLACE_Z]
 
             # ---- IK (transcribed from _gen_sim_demos.step_to) ----
             self._script_ik.reset()
@@ -453,6 +483,13 @@ class IsaacSO101Env(gym.Env):
             for k, jid in enumerate(arm_ids):
                 action[0, jid] = (q_des[0, k] - qdef[0, jid]) / 0.5
             action[0, grip_idx] = grip
+            # diagnostic: periodically report which phase the scripted base reaches + whether the
+            # die is lifted (disambiguates "episode too short to reach carry/place" vs "grasp not
+            # lifting under the residual blend"). Off-path of the action; cheap.
+            self._script_dbg_count = getattr(self, "_script_dbg_count", 0) + 1
+            if self._script_dbg_count % 150 == 0:
+                print(f"[script-dbg] phase={self._script_phase} obj_lifted={obj_lifted} "
+                      f"oz={oz:.3f} ez={ez:.3f} xy_to_tgt={xy_to_tgt:.3f}", flush=True)
             return action[0].detach().cpu().numpy().astype(np.float32)
         except Exception as exc:  # noqa: BLE001
             n = getattr(self, "_script_warn_count", 0) + 1
