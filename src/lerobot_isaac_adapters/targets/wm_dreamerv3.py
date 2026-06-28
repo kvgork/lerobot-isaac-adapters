@@ -168,16 +168,20 @@ def _convert_dataset(args: argparse.Namespace) -> Path:
         print(f"[wm_dreamerv3] Conversion cache found: {hdf5_path} — skipping.")
         return hdf5_path
 
-    # Import bridge skill Python API (soft import)
+    # World-model bridge API. Primary home is now this package
+    # (lerobot_isaac_adapters.data.world_model_bridge); the legacy skill path is a
+    # fallback for older checkouts where the skill hasn't been refactored yet.
     try:
-        from skills.lerobot_world_model_bridge.operations import lerobot_to_worldmodel
+        from lerobot_isaac_adapters.data.world_model_bridge import lerobot_to_worldmodel
     except ImportError:
-        # Skill may not be on PYTHONPATH; provide helpful guidance
-        raise ImportError(
-            "Cannot import lerobot_world_model_bridge skill. "
-            "Add ${CLAUDE_CODE_ROOT} to PYTHONPATH:\n"
-            "  export PYTHONPATH=${CLAUDE_CODE_ROOT}:$PYTHONPATH"
-        )
+        try:
+            from skills.lerobot_world_model_bridge.operations import lerobot_to_worldmodel
+        except ImportError:
+            raise ImportError(
+                "Cannot import the world-model bridge. Expected "
+                "lerobot_isaac_adapters.data.world_model_bridge (this package) or, as a "
+                "fallback, the lerobot_world_model_bridge skill on PYTHONPATH."
+            )
 
     bridge_kwargs = _resolve_bridge_kwargs(args)
     print(
