@@ -22,8 +22,10 @@ import pytest
 from lerobot_isaac_adapters.train import _build_parser, _dispatch, _ALL_ARCHS
 
 VALID_ARCHS = list(_ALL_ARCHS)
-# Expected: smolvla, act, diffusion, dreamerv3, le_world_model
-assert len(VALID_ARCHS) == 5, f"Expected 5 archs, got {VALID_ARCHS}"
+# Expected: smolvla, act, diffusion (plain policies),
+#           vla_jepa, fastwam, lingbot_va (lerobot >=0.6.0 world-model policies),
+#           dreamerv3, le_world_model (predictive world-model backends).
+assert len(VALID_ARCHS) == 8, f"Expected 8 archs, got {VALID_ARCHS}"
 
 # Path to src/ so subprocess invocations can find the package
 _SRC_DIR = str(Path(__file__).parent.parent / "src")
@@ -270,9 +272,12 @@ class TestDryRun:
         )
 
     def test_leworldmodel_dry_run_prints_lerobot_train_world_model(
-        self, capsys
+        self, capsys, monkeypatch
     ) -> None:
-        """LeWorldModel dry-run output must include 'train_world_model'."""
+        """LeWorldModel HF-backend dry-run output must include 'train_world_model'.
+        (The default backend is the in-process _lewm_minimal trainer — lerobot
+        0.6.0 still does not ship a standalone train_world_model CLI.)"""
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")
         parser = _build_parser()
         args = parser.parse_args(
             [
@@ -289,7 +294,9 @@ class TestDryRun:
             f"Expected 'train_world_model' in dry-run output.\nstdout: {captured.out!r}"
         )
 
-    @pytest.mark.parametrize("arch", ["act", "diffusion"])
+    @pytest.mark.parametrize(
+        "arch", ["act", "diffusion", "vla_jepa", "fastwam", "lingbot_va"]
+    )
     def test_policy_arch_dry_run_prints_policy_type(self, arch: str, capsys) -> None:
         """Policy archs dry-run must include the correct --policy.type flag."""
         parser = _build_parser()
@@ -306,6 +313,49 @@ class TestDryRun:
         captured = capsys.readouterr()
         assert f"--policy.type={arch}" in captured.out, (
             f"Expected '--policy.type={arch}' in dry-run output.\nstdout: {captured.out!r}"
+        )
+
+
+class TestWorldModelPolicies:
+    """lerobot >=0.6.0 world-model policies (vla_jepa / fastwam / lingbot_va).
+
+    They dispatch through policy_lerobot (metric pc_success), so on the CLI they
+    behave exactly like the plain policies — only --policy.type differs.
+    """
+
+    _WM_POLICIES = ["vla_jepa", "fastwam", "lingbot_va"]
+
+    @pytest.mark.parametrize("arch", _WM_POLICIES)
+    def test_wm_policy_dry_run_prints_lerobot_train_and_type(
+        self, arch: str, capsys
+    ) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["--target_arch", arch, "--dataset", "lerobot/pusht", "--dry_run"]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "lerobot-train" in out
+        assert f"--policy.type={arch}" in out
+
+    @pytest.mark.parametrize("arch", _WM_POLICIES)
+    def test_policy_path_omits_policy_type(self, arch: str, capsys) -> None:
+        """A pretrained checkpoint via --policy.path must suppress the auto
+        --policy.type (passing both is a draccus conflict in lerobot 0.6.0)."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", arch, "--dataset", "lerobot/pusht", "--dry_run",
+                "--", "--policy.path=lerobot/VLA-JEPA-Pretrain",
+            ]
+        )
+        rc = _dispatch(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "--policy.path=lerobot/VLA-JEPA-Pretrain" in out
+        assert "--policy.type=" not in out, (
+            f"--policy.type must be omitted when --policy.path is set.\nstdout: {out!r}"
         )
 
 

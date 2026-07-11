@@ -6,6 +6,13 @@ Training dispatch for LeRobot policy architectures:
   - smolvla
   - act
   - diffusion
+  - vla_jepa    (lerobot >=0.6.0 world-model policy)
+  - fastwam     (lerobot >=0.6.0 world-model policy)
+  - lingbot_va  (lerobot >=0.6.0 world-model policy)
+
+The world-model policies use the SAME ``lerobot-train`` CLI as the plain
+policies (only ``--policy.type`` differs) and report ``eval/pc_success`` the
+same way, so no separate dispatch is needed.
 
 Invokes the ``lerobot-train`` CLI via subprocess, streams stdout line-by-line,
 and re-emits ``eval/pc_success`` metrics via ``metric_extractor.emit()`` so
@@ -98,7 +105,9 @@ def _lerobot_policy_type(target_arch: str) -> str:
     Parameters
     ----------
     target_arch:
-        One of ``smolvla``, ``act``, ``diffusion``.
+        One of ``smolvla``, ``act``, ``diffusion`` (plain policies) or
+        ``vla_jepa``, ``fastwam``, ``lingbot_va`` (lerobot >=0.6.0 world-model
+        policies). The mapping is 1:1 with LeRobot's ``--policy.type`` names.
 
     Returns
     -------
@@ -109,6 +118,10 @@ def _lerobot_policy_type(target_arch: str) -> str:
         "smolvla": "smolvla",
         "act": "act",
         "diffusion": "diffusion",
+        # lerobot >=0.6.0 world-model policies (identity map to --policy.type).
+        "vla_jepa": "vla_jepa",
+        "fastwam": "fastwam",
+        "lingbot_va": "lingbot_va",
     }
     if target_arch not in mapping:
         raise ValueError(
@@ -126,7 +139,8 @@ def run(args: argparse.Namespace) -> int:
     args:
         Parsed CLI namespace from ``lerobot_isaac_adapters.train``.
         Expected attributes:
-          - ``target_arch``  (str) — one of smolvla/act/diffusion
+          - ``target_arch``  (str) — one of smolvla/act/diffusion or the
+            lerobot >=0.6.0 world-model policies vla_jepa/fastwam/lingbot_va
           - ``dataset``      (str | None)
           - ``config``       (str | None)
           - ``output_dir``   (str)
@@ -192,8 +206,18 @@ def run(args: argparse.Namespace) -> int:
     else:
         cmd = ["lerobot-train"]
 
+    # Omit --policy.type when the caller loads a pretrained checkpoint via
+    # `--policy.path=` (lerobot infers the policy type from the checkpoint;
+    # passing both --policy.path and --policy.type is a draccus conflict). This
+    # is the recommended entry for the world-model policies, e.g.
+    # `-- --policy.path=lerobot/VLA-JEPA-Pretrain`. The smolvla resume flag
+    # `--policy.pretrained_path=` coexists with --policy.type and is left alone.
+    _remainder = getattr(args, "remainder", None) or []
+    _has_policy_path = any(a.split("=", 1)[0] == "--policy.path" for a in _remainder)
+    if not _has_policy_path:
+        cmd.append(f"--policy.type={policy_type}")
+
     cmd += [
-        f"--policy.type={policy_type}",
         f"--dataset.repo_id={dataset_repo_id}",
         f"--dataset.video_backend={video_backend}",
         f"--batch_size={args.batch_size}",
@@ -239,7 +263,12 @@ def run(args: argparse.Namespace) -> int:
             )
 
     if args.config:
-        cmd.insert(1, f"--config_path={args.config}")
+        # Append (do NOT insert at a fixed index): when needs_wrapper is True the
+        # cmd prefix is [python, "-m", module], so cmd.insert(1, ...) would wedge
+        # the flag between the interpreter and "-m" and abort before the module
+        # loads. lerobot/draccus parse --key=value order-independently, so
+        # appending among the other lerobot flags is safe for both cmd shapes.
+        cmd.append(f"--config_path={args.config}")
 
     # Passthrough extra args (strip leading '--' separator if present)
     if getattr(args, "remainder", None):

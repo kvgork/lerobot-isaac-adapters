@@ -132,6 +132,25 @@ class TestPolicyLerobotSubprocess:
         # lerobot >= 0.5 CLI: --config_path (was --config in older releases).
         assert "--config_path=/tmp/my_config.yaml" in cmd
 
+    def test_config_with_cache_frames_no_malformed_argv(self) -> None:
+        """Regression: --config + --cache_frames must not wedge --config_path
+        between the interpreter and '-m'. Before the fix, cmd.insert(1, ...) put
+        --config_path at index 1 of [python, '-m', module, ...], aborting the run
+        before the module ever loaded."""
+        mock_popen, _ = _mock_popen()
+        args = _make_args(
+            target_arch="vla_jepa",
+            config="/tmp/my_config.yaml",
+            cache_frames=True,
+        )
+        with patch("subprocess.Popen", mock_popen):
+            policy_lerobot.run(args)
+        cmd = mock_popen.call_args[0][0]
+        # Wrapper prefix must stay contiguous: [python, '-m', module, ...].
+        assert cmd[1] == "-m", f"expected '-m' at index 1, got {cmd!r}"
+        assert cmd[2] == "lerobot_isaac_adapters.cli_train_cached"
+        assert "--config_path=/tmp/my_config.yaml" in cmd
+
     def test_nonzero_returncode_propagated(self) -> None:
         mock_popen, _ = _mock_popen(returncode=1)
         args = _make_args(target_arch="smolvla")
@@ -271,7 +290,10 @@ class TestWmDreamerv3DryRun:
 class TestWmLeWorldModelDryRun:
     """wm_leworldmodel.run() dry_run must print both steps without spawning processes."""
 
-    def test_dry_run_shows_train_world_model(self, capsys) -> None:
+    def test_dry_run_shows_train_world_model(self, capsys, monkeypatch) -> None:
+        # train_world_model is the opt-in HF backend; the default backend is the
+        # in-process _lewm_minimal trainer (lerobot never shipped the CLI).
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")
         args = _make_args(target_arch="le_world_model", dry_run=True)
         rc = wm_leworldmodel.run(args)
 
@@ -414,7 +436,8 @@ class TestWmDreamerv3Subprocess:
 class TestWmLeWorldModelSubprocess:
     """wm_leworldmodel.run() real path must call lerobot.scripts.train_world_model."""
 
-    def test_train_world_model_command_built(self, tmp_path) -> None:
+    def test_train_world_model_command_built(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")  # opt into HF subprocess path
         hdf5_path = tmp_path / "leworldmodel_data.hdf5"
         hdf5_path.touch()
         mock_popen, _ = _mock_popen()
@@ -433,7 +456,8 @@ class TestWmLeWorldModelSubprocess:
         assert "lerobot.scripts.train_world_model" in " ".join(cmd)
         assert any("50" in part for part in cmd)
 
-    def test_nonzero_returncode_propagated(self, tmp_path) -> None:
+    def test_nonzero_returncode_propagated(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")  # opt into HF subprocess path
         hdf5_path = tmp_path / "leworldmodel_data.hdf5"
         hdf5_path.touch()
         mock_popen, _ = _mock_popen(returncode=3)
@@ -448,7 +472,8 @@ class TestWmLeWorldModelSubprocess:
 
         assert rc == 3
 
-    def test_file_not_found_returns_127(self, tmp_path) -> None:
+    def test_file_not_found_returns_127(self, tmp_path, monkeypatch) -> None:
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")  # opt into HF subprocess path
         hdf5_path = tmp_path / "leworldmodel_data.hdf5"
         hdf5_path.touch()
         args = _make_args(
@@ -462,8 +487,9 @@ class TestWmLeWorldModelSubprocess:
 
         assert rc == 127
 
-    def test_pred_loss_re_emitted(self, tmp_path, capsys) -> None:
-        """pred_loss lines from stdout are re-emitted."""
+    def test_pred_loss_re_emitted(self, tmp_path, capsys, monkeypatch) -> None:
+        """pred_loss lines from stdout are re-emitted (HF subprocess backend)."""
+        monkeypatch.setenv("LEROBOT_ISAAC_LEWM_BACKEND", "hf")  # opt into HF subprocess path
         hdf5_path = tmp_path / "leworldmodel_data.hdf5"
         hdf5_path.touch()
         mock_popen, _ = _mock_popen(

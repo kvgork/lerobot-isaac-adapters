@@ -16,8 +16,18 @@ The ``--target_arch`` argument determines which backend is invoked:
 - ``smolvla``        -> ``targets.policy_lerobot.run()``
 - ``act``            -> ``targets.policy_lerobot.run()``
 - ``diffusion``      -> ``targets.policy_lerobot.run()``
+- ``vla_jepa``       -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
+- ``fastwam``        -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
+- ``lingbot_va``     -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
 - ``dreamerv3``      -> ``targets.wm_dreamerv3.run()``
 - ``le_world_model`` -> ``targets.wm_leworldmodel.run()``
+
+The ``vla_jepa`` / ``fastwam`` / ``lingbot_va`` archs are the world-model
+*policies* introduced in lerobot 0.6.0. They are ordinary LeRobot policies
+(they emit ``pc_success``) that use a world model as a training-time auxiliary,
+so they dispatch through the same ``lerobot-train`` subprocess as the plain
+policies — NOT through the predictive world-model backends (dreamerv3 /
+le_world_model), which are a different concept.
 
 All backends accept the same ``argparse.Namespace`` argument and emit metrics
 to stdout via ``metric_extractor.emit()``.
@@ -32,8 +42,18 @@ import argparse
 import sys
 
 _POLICY_ARCHS = ("smolvla", "act", "diffusion")
+# lerobot >=0.6.0 world-model policies. These are POLICIES (they emit
+# pc_success) that use a world model as a *training-time* auxiliary; they
+# dispatch through the same `lerobot-train` subprocess as the plain policies
+# above (targets.policy_lerobot), NOT through the predictive world-model
+# backends below. vla_jepa (~2B, WM dropped at inference, ships pretrained
+# ckpts) is the only one that fits an RTX 3080 10GB; fastwam (~5B) and
+# lingbot_va (~5B + ~20GB frozen components) are registered for larger
+# hardware — see docs/runbook/03-train-policy.md and the RTX-3080 pitfalls.
+_WM_POLICY_ARCHS = ("vla_jepa", "fastwam", "lingbot_va")
+# Predictive world-model backends (separate dispatch + their own metrics).
 _WM_ARCHS = ("dreamerv3", "le_world_model")
-_ALL_ARCHS = _POLICY_ARCHS + _WM_ARCHS
+_ALL_ARCHS = _POLICY_ARCHS + _WM_POLICY_ARCHS + _WM_ARCHS
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,8 +61,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="lerobot-isaac-train",
         description=(
             "Unified training entrypoint for LeRobot + Isaac Lab.\n"
-            "Dispatches to policy (smolvla/act/diffusion) or world-model "
-            "(dreamerv3/le_world_model) backends based on --target_arch."
+            "Dispatches to policy (smolvla/act/diffusion), lerobot 0.6.0 "
+            "world-model policy (vla_jepa/fastwam/lingbot_va), or predictive "
+            "world-model (dreamerv3/le_world_model) backends based on --target_arch."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -62,7 +83,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Training backend to use. "
             f"Policy archs: {', '.join(_POLICY_ARCHS)}. "
-            f"World-model archs: {', '.join(_WM_ARCHS)}."
+            f"World-model policy archs (lerobot >=0.6.0): "
+            f"{', '.join(_WM_POLICY_ARCHS)}. "
+            f"Predictive world-model archs: {', '.join(_WM_ARCHS)}."
         ),
     )
     parser.add_argument(
@@ -375,7 +398,10 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     arch = args.target_arch
 
-    if arch in _POLICY_ARCHS:
+    if arch in _POLICY_ARCHS or arch in _WM_POLICY_ARCHS:
+        # Plain policies AND lerobot 0.6.0 world-model policies both train via
+        # the `lerobot-train` subprocess (policy_lerobot maps target_arch ->
+        # --policy.type 1:1) and report pc_success.
         from lerobot_isaac_adapters.targets import policy_lerobot as backend
     elif arch == "dreamerv3":
         from lerobot_isaac_adapters.targets import wm_dreamerv3 as backend  # type: ignore[assignment]
