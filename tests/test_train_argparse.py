@@ -358,6 +358,60 @@ class TestWorldModelPolicies:
             f"--policy.type must be omitted when --policy.path is set.\nstdout: {out!r}"
         )
 
+    def test_vla_jepa_policy_path_auto_injects_recipe(self, capsys) -> None:
+        """vla_jepa + a pretrained --policy.path auto-adds freeze_qwen + reinit
+        (the GPU-verified RTX-3080 fine-tune recipe)."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "vla_jepa", "--dataset", "lerobot/pusht", "--dry_run",
+                "--", "--policy.path=lerobot/VLA-JEPA-Pretrain",
+            ]
+        )
+        assert _dispatch(args) == 0
+        out = capsys.readouterr().out
+        assert "--policy.freeze_qwen=true" in out
+        assert "--policy.reinit_modules=[" in out
+
+    def test_vla_jepa_from_scratch_no_recipe(self, capsys) -> None:
+        """No --policy.path (train from scratch) => recipe not injected."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            ["--target_arch", "vla_jepa", "--dataset", "lerobot/pusht", "--dry_run"]
+        )
+        assert _dispatch(args) == 0
+        out = capsys.readouterr().out
+        assert "--policy.freeze_qwen" not in out
+        assert "--policy.reinit_modules" not in out
+        assert "--policy.type=vla_jepa" in out
+
+    def test_fastwam_policy_path_no_freeze_qwen(self, capsys) -> None:
+        """freeze_qwen is a vla_jepa attribute; must not leak to fastwam."""
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "fastwam", "--dataset", "lerobot/pusht", "--dry_run",
+                "--", "--policy.path=some/ckpt",
+            ]
+        )
+        assert _dispatch(args) == 0
+        out = capsys.readouterr().out
+        assert "--policy.freeze_qwen" not in out
+        assert "--policy.reinit_modules" not in out
+
+    def test_vla_jepa_user_freeze_qwen_not_overridden(self, capsys) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(
+            [
+                "--target_arch", "vla_jepa", "--dataset", "lerobot/pusht", "--dry_run",
+                "--", "--policy.path=X", "--policy.freeze_qwen=false",
+            ]
+        )
+        assert _dispatch(args) == 0
+        out = capsys.readouterr().out
+        assert "--policy.freeze_qwen=false" in out
+        assert "--policy.freeze_qwen=true" not in out
+
 
 class TestLoraFlags:
     """LoRA / PEFT flag passthrough — Phase 1.4 contract."""
