@@ -346,6 +346,15 @@ class IsaacSO101Env(gym.Env):
             logger.info(
                 "scripted-grasp controller initialised (residual RL base action)"
             )
+            # print (not just logger): the module logger is swallowed in the
+            # sheeprl/Isaac run, so a smoke couldn't tell whether the residual base
+            # initialised. This one-time line makes it visible.
+            print(
+                "[residual-rl] scripted-grasp controller INITIALISED "
+                f"(ee_idx={self._script_ee_idx}, arm_ids={self._script_arm_ids}, "
+                f"adim={self._script_adim}, fixed_base={_fixed}).",
+                flush=True,
+            )
             return True
         except Exception as exc:  # noqa: BLE001 — never let init break the run
             self._script_ready = False
@@ -365,6 +374,17 @@ class IsaacSO101Env(gym.Env):
                     self._script_init_attempts,
                     exc,
                 )
+            # print (not just logger) so the smoke sees the REAL failure reason
+            # regardless of logging config; include the traceback on the first hit.
+            import traceback
+
+            print(
+                f"[residual-rl] scripted-grasp controller INIT FAILED "
+                f"(attempt {self._script_init_attempts}/3): {type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            if self._script_init_attempts == 1:
+                traceback.print_exc()
             return False
 
     def _script_reset_phase(self) -> None:
