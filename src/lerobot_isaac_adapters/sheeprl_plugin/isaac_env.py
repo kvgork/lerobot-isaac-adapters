@@ -27,6 +27,7 @@ Soft-imports throughout — module remains importable in any env
 (sheeprl-only, dashboard-only). Isaac Lab is only loaded inside
 `IsaacSO101Env._boot()`.
 """
+
 from __future__ import annotations
 
 import logging
@@ -35,6 +36,8 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+
+from lerobot_isaac_adapters import scripted_grasp_phases as _phases
 
 logger = logging.getLogger(__name__)
 
@@ -91,25 +94,29 @@ _STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
 #     pick_and_place scene geometry (die rest z≈0.05, grasp_z≈0.106, z_high≈0.17 —
 #     same waypoints as scripts/_gen_sim_demos.py). GPU-validation pending: these gate
 #     phase selection, so a wrong value mis-sequences the controller.
-_DIE_REST_Z = 0.05          # die resting height above table (object spawn z)
-_LIFT_MARGIN = 0.04         # die counts as "lifted" above rest+this
-_HOLD_TOL = 0.06            # ee↔die 3-D dist below which the die is deemed IN the gripper
-_REACH_MAX = 0.30           # reach-envelope clamp on the grasp target (max planar reach ~0.346)
-_ALIGN_TOL = 0.015          # ee within this planar dist of the latched target ⇒ aligned
-_HIGH_MARGIN = 0.04         # ee above grasp_z+this ⇒ "high" (align here before descending)
+_DIE_REST_Z = 0.05  # die resting height above table (object spawn z)
+_LIFT_MARGIN = 0.04  # die counts as "lifted" above rest+this
+_HOLD_TOL = 0.06  # ee↔die 3-D dist below which the die is deemed IN the gripper
+_REACH_MAX = 0.30  # reach-envelope clamp on the grasp target (max planar reach ~0.346)
+_ALIGN_TOL = 0.015  # ee within this planar dist of the latched target ⇒ aligned
+_HIGH_MARGIN = 0.04  # ee above grasp_z+this ⇒ "high" (align here before descending)
 _GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
-_STABILIZE_STEPS = 20       # steps to settle (gripper OPEN) at grasp depth before closing
-_CLOSE_RAMP = 40            # steps over which the grip interpolates OPEN→CLOSE (slow cradle)
-_CLOSE_DWELL = 60           # total steps in CLOSE (ramp + firm hold) before lifting
-_LIFT_RATE = 0.012          # max ee z rise per step during LIFT (gradual, not a yank)
+_CLOSE_RAMP = 40  # steps over which the grip interpolates OPEN→CLOSE (slow cradle)
+_LIFT_RATE = 0.012  # max ee z rise per step during LIFT (gradual, not a yank)
+# NOTE: the phase SCHEDULE (order, per-phase step caps, STABILIZE/CLOSE dwell counts,
+# re-grasp cap) + the pure transition function live in
+# `lerobot_isaac_adapters.scripted_grasp_phases` (imported as `_phases`) so they are
+# unit-testable without the Isaac/gymnasium stack.
 # --- carry+place phases (extend the residual base from grasp+lift to the FULL pick-place,
 #     mirroring scripts/_gen_sim_demos.py: CARRY→LOWER→RELEASE. Without these the scripted
 #     base only grasps+lifts and the residual RL must discover carry+place from scratch — the
 #     exact wall it never breaks (S3 run 2026-06-27: reward climbed but ep_len_avg stayed 300,
 #     0 places). With them the base places ~the scripted rate and RL only refines it.)
-_PLACE_Z = 0.06             # ee z over the bin at release (die lands in the cup); matches demo-gen
-_CARRY_TOL = 0.03           # ee planar dist to bin centre ⇒ over the bin, start lowering
-_RELEASE_RAMP = 50          # steps to GRADUALLY open at the bin (avoid ejecting the die on release)
+_PLACE_Z = 0.06  # ee z over the bin at release (die lands in the cup); matches demo-gen
+_CARRY_TOL = 0.03  # ee planar dist to bin centre ⇒ over the bin, start lowering
+_RELEASE_RAMP = (
+    50  # steps to GRADUALLY open at the bin (avoid ejecting the die on release)
+)
 
 
 class IsaacSO101Env(gym.Env):
@@ -164,7 +171,9 @@ class IsaacSO101Env(gym.Env):
         self.enable_cameras = enable_cameras
 
         # Compute state dimension based on env-var flag.
-        state_dim = _STATE_DIM_BASE + (_STATE_DIM_OBJECT_POSE if _INCLUDE_OBJECT_POSE else 0)
+        state_dim = _STATE_DIM_BASE + (
+            _STATE_DIM_OBJECT_POSE if _INCLUDE_OBJECT_POSE else 0
+        )
         self._state_dim = state_dim
 
         # Spaces declared up-front so sheeprl's make_env() space-inspection
@@ -191,7 +200,7 @@ class IsaacSO101Env(gym.Env):
         self._rng = np.random.default_rng(seed)
         self._t = 0
         self._isaac_env: Any = None  # populated by _boot()
-        self._app: Any = None        # SimulationApp handle
+        self._app: Any = None  # SimulationApp handle
         self._booted = False
         self._has_camera_term = False  # set by _boot() probe
 
@@ -244,7 +253,9 @@ class IsaacSO101Env(gym.Env):
         import torch
 
         with torch.inference_mode(False):
-            raw_obs, raw_reward, raw_term, raw_trunc, raw_info = self._isaac_env.step(action_t)
+            raw_obs, raw_reward, raw_term, raw_trunc, raw_info = self._isaac_env.step(
+                action_t
+            )
         obs = self._translate_obs(raw_obs)
         reward = float(self._scalar(raw_reward))
         terminated = bool(self._scalar(raw_term))
@@ -293,12 +304,20 @@ class IsaacSO101Env(gym.Env):
             self._script_ee_idx = int(robot.find_bodies("gripper_link")[0][0])
             self._script_arm_ids = list(
                 robot.find_joints(
-                    ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+                    [
+                        "shoulder_pan",
+                        "shoulder_lift",
+                        "elbow_flex",
+                        "wrist_flex",
+                        "wrist_roll",
+                    ]
                 )[0]
             )
             self._script_grip_idx = int(robot.find_joints("gripper")[0][0])
             _fixed = bool(getattr(robot, "is_fixed_base", True))
-            self._script_ee_jac = (self._script_ee_idx - 1) if _fixed else self._script_ee_idx
+            self._script_ee_jac = (
+                (self._script_ee_idx - 1) if _fixed else self._script_ee_idx
+            )
             self._script_jac_off = 0 if _fixed else 6
             self._script_qdef = robot.data.default_joint_pos.clone()
             self._script_adim = int(self._isaac_env.action_space.shape[-1])
@@ -310,15 +329,23 @@ class IsaacSO101Env(gym.Env):
                 device=self._script_dev,
             )
             # Waypoint constants — same as _gen_sim_demos.py defaults.
-            self._script_grasp_z = float(os.environ.get("LEROBOT_ISAAC_GRASP_Z", "0.106"))
-            self._script_z_high = float(os.environ.get("LEROBOT_ISAAC_SCRIPT_Z_HIGH", "0.17"))
+            self._script_grasp_z = float(
+                os.environ.get("LEROBOT_ISAAC_GRASP_Z", "0.106")
+            )
+            self._script_z_high = float(
+                os.environ.get("LEROBOT_ISAAC_SCRIPT_Z_HIGH", "0.17")
+            )
             self._script_tgt_x = float(os.environ.get("LEROBOT_ISAAC_TARGET_X", "0.22"))
-            self._script_tgt_y = float(os.environ.get("LEROBOT_ISAAC_TARGET_Y", "-0.13"))
+            self._script_tgt_y = float(
+                os.environ.get("LEROBOT_ISAAC_TARGET_Y", "-0.13")
+            )
             self._script_quat = [1.0, 0.0, 0.0, 0.0]  # straight-down grasp
             # Hybrid phase-machine state (per episode): demo-ordered, state-gated.
             self._script_reset_phase()
             self._script_ready = True
-            logger.info("scripted-grasp controller initialised (residual RL base action)")
+            logger.info(
+                "scripted-grasp controller initialised (residual RL base action)"
+            )
             return True
         except Exception as exc:  # noqa: BLE001 — never let init break the run
             self._script_ready = False
@@ -328,22 +355,50 @@ class IsaacSO101Env(gym.Env):
                 logger.error(
                     "scripted-grasp controller init failed %d× — residual DISABLED for "
                     "the rest of this run: %s",
-                    self._script_init_attempts, exc,
+                    self._script_init_attempts,
+                    exc,
                 )
                 self._script_init_failed = True
             else:
                 logger.warning(
                     "scripted-grasp controller init failed (attempt %d/3, will retry): %s",
-                    self._script_init_attempts, exc,
+                    self._script_init_attempts,
+                    exc,
                 )
             return False
 
     def _script_reset_phase(self) -> None:
-        """Reset the scripted-grasp phase machine for a new episode."""
+        """Full reset of the scripted-grasp phase machine for a NEW episode."""
         self._script_phase = "APPROACH"
         self._script_gx = None  # target xy, latched at APPROACH (reach-clamped)
         self._script_gy = None
         self._script_close_count = 0
+        self._script_phase_steps = (
+            0  # steps spent in the current phase (drives the cap)
+        )
+        self._script_regrasps = (
+            0  # bounded backward re-grasp count (see _phases.MAX_REGRASPS)
+        )
+
+    def _advance_phase(self, nxt: str) -> None:
+        """Enter phase ``nxt``: reset the per-phase step + close counters.
+
+        ``close_count`` is the internal counter for STABILIZE / CLOSE / RELEASE, so
+        it must start fresh on each phase entry; the other phases ignore it.
+        """
+        self._script_phase = nxt
+        self._script_phase_steps = 0
+        self._script_close_count = 0
+
+    def _script_regrasp(self) -> None:
+        """Bounded mid-episode fall-back to APPROACH (die dropped) — re-latch the
+        target but KEEP the regrasp counter so it cannot loop forever."""
+        self._script_regrasps += 1
+        self._script_phase = "APPROACH"
+        self._script_phase_steps = 0
+        self._script_close_count = 0
+        self._script_gx = None  # re-latch (the die may have moved)
+        self._script_gy = None
 
     def compute_scripted_action(self) -> np.ndarray | None:
         """Return a (action_dim,) scripted-grasp action for the CURRENT pre-step state.
@@ -381,8 +436,8 @@ class IsaacSO101Env(gym.Env):
             # ---- live state (world frame; ee pose is a function of joint_pos, which is
             #      in the obs, and obj pose is in the obs when INCLUDE_OBJECT_POSE=1 —
             #      so the scripted action is reproducible by the actor) ----
-            obj_pos = obj.data.root_pos_w[0]                       # (3,) world
-            ee_pos_w = robot.data.body_pos_w[0, ee_idx, :]         # (3,) world
+            obj_pos = obj.data.root_pos_w[0]  # (3,) world
+            ee_pos_w = robot.data.body_pos_w[0, ee_idx, :]  # (3,) world
             ox, oy, oz = float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2])
             ex, ey, ez = float(ee_pos_w[0]), float(ee_pos_w[1]), float(ee_pos_w[2])
 
@@ -400,85 +455,85 @@ class IsaacSO101Env(gym.Env):
             xy_to_tgt = ((ex - gx) ** 2 + (ey - gy) ** 2) ** 0.5
             ee_to_obj_3d = ((ex - ox) ** 2 + (ey - oy) ** 2 + (ez - oz) ** 2) ** 0.5
             obj_lifted = oz > (_DIE_REST_Z + _LIFT_MARGIN)
-            aligned = xy_to_tgt < _ALIGN_TOL          # tight: < die half-width, so close
-            ee_high = ez > (grasp_z + _HIGH_MARGIN)   #        doesn't knock the die
+            aligned = xy_to_tgt < _ALIGN_TOL  # tight: < die half-width, so close
+            ee_high = ez > (grasp_z + _HIGH_MARGIN)  #        doesn't knock the die
             at_depth = ez < (grasp_z + _GRASP_DEPTH_MARGIN)
 
-            # ---- hybrid phase machine (demo-ordered, state-gated) ----
+            # ---- phase machine: OPEN-LOOP schedule + state-gate early-exit ----
+            # Set target+grip for the CURRENT phase; the transition to the NEXT phase
+            # is a pure function (_phases.next_phase) with HARD per-phase step caps,
+            # so the machine cannot stall on a gate that the blended/clamped action
+            # never satisfies (the diagnosed APPROACH stall). The gates remain as fast
+            # early-exits when motion is clean.
+            self._script_phase_steps += 1
             ph = self._script_phase
-            if ph == "APPROACH":
-                # align over the die while HIGH (open), then descend
+            tx, ty = self._script_tgt_x, self._script_tgt_y
+            if ph == "APPROACH":  # align over the die while HIGH (open)
                 target, grip = [gx, gy, z_high], GRIP_OPEN
-                if aligned and ee_high:
-                    self._script_phase = "DESCEND"
-            elif ph == "DESCEND":
+            elif ph == "DESCEND":  # straight down to grasp depth (open)
                 target, grip = [gx, gy, grasp_z], GRIP_OPEN
-                if not aligned and ee_high:
-                    self._script_phase = "APPROACH"        # lost alignment up high → re-align
-                elif at_depth:
-                    self._script_phase = "STABILIZE"
-            elif ph == "STABILIZE":
-                # settle at grasp depth with the gripper OPEN so the die sits BETWEEN the
-                # fingers before closing (the demo's 30-step stabilize — without it the
-                # fingers close beside/above the die and it slips out on lift).
+            elif ph == "STABILIZE":  # settle open at depth (die sits between fingers)
                 target, grip = [gx, gy, grasp_z], GRIP_OPEN
                 self._script_close_count += 1
-                if self._script_close_count >= _STABILIZE_STEPS:
-                    self._script_close_count = 0
-                    self._script_phase = "CLOSE"
-            elif ph == "CLOSE":
+            elif ph == "CLOSE":  # gradual cradle-close (an instant close ejects it)
                 self._script_close_count += 1
-                # GRADUAL close (cradle the die) like the demo's interpolated 80-step
-                # close, then hold firmly — an instant full close ejects/slips the die.
                 frac = min(1.0, self._script_close_count / _CLOSE_RAMP)
                 grip = GRIP_OPEN + (GRIP_CLOSE - GRIP_OPEN) * frac  # 1.0 → -1.0
                 target = [gx, gy, grasp_z]
-                if self._script_close_count >= _CLOSE_DWELL:
-                    self._script_phase = "LIFT"
-            elif ph == "LIFT":  # raise GRADUALLY (a fast yank to z_high breaks the grip;
-                   # the demo lifts over ~60 steps), then CARRY to the bin once high+held.
-                lift_z = min(z_high, ez + _LIFT_RATE)
-                target, grip = [gx, gy, lift_z], GRIP_CLOSE
-                # if we've lifted clear of grasp depth but the die didn't come with us
-                # (not captured), drop back and re-grasp
-                if not obj_lifted and ee_to_obj_3d > _HOLD_TOL and ez > grasp_z + 0.03:
-                    self._script_reset_phase()
-                elif obj_lifted and ez > z_high - 0.01:  # lifted to carry height → carry to bin
-                    self._script_phase = "CARRY"
-            elif ph == "CARRY":  # move (held, high) to over the bin, then LOWER
-                tx, ty = self._script_tgt_x, self._script_tgt_y
+            elif ph == "LIFT":  # raise GRADUALLY (a yank breaks the grip)
+                target, grip = [gx, gy, min(z_high, ez + _LIFT_RATE)], GRIP_CLOSE
+            elif ph == "CARRY":  # move held+high to over the bin
                 target, grip = [tx, ty, z_high], GRIP_CLOSE
-                xy_to_bin = ((ex - tx) ** 2 + (ey - ty) ** 2) ** 0.5
-                if not obj_lifted and ee_to_obj_3d > _HOLD_TOL:  # dropped mid-carry → re-grasp
-                    self._script_reset_phase()
-                elif xy_to_bin < _CARRY_TOL:                     # over the bin → lower in
-                    self._script_phase = "LOWER"
-            elif ph == "LOWER":  # descend over the bin to release depth, gripper still closed
-                tx, ty = self._script_tgt_x, self._script_tgt_y
+            elif ph == "LOWER":  # descend over the bin to release depth (closed)
                 target, grip = [tx, ty, _PLACE_Z], GRIP_CLOSE
-                if ez < _PLACE_Z + _GRASP_DEPTH_MARGIN:          # at release depth → release
-                    self._script_close_count = 0
-                    self._script_phase = "RELEASE"
-            else:  # RELEASE — GRADUAL open at the bin to drop the die in (instant open ejects it),
-                   # then hold open low so the place predicate (resting + released) latches.
-                tx, ty = self._script_tgt_x, self._script_tgt_y
+            else:  # RELEASE — gradual open to drop the die in
                 self._script_close_count += 1
                 frac = min(1.0, self._script_close_count / _RELEASE_RAMP)
                 grip = GRIP_CLOSE + (GRIP_OPEN - GRIP_CLOSE) * frac  # -1.0 → 1.0
                 target = [tx, ty, _PLACE_Z]
 
+            # transition (pure; hard caps guarantee forward progress → never stalls)
+            xy_to_bin = ((ex - tx) ** 2 + (ey - ty) ** 2) ** 0.5
+            nxt, regrasp = _phases.next_phase(
+                ph,
+                self._script_phase_steps,
+                self._script_close_count,
+                self._script_regrasps,
+                aligned=aligned,
+                ee_high=ee_high,
+                at_depth=at_depth,
+                obj_lifted=obj_lifted,
+                ee_at_carry_height=(ez > z_high - 0.01),
+                not_holding=(
+                    not obj_lifted and ee_to_obj_3d > _HOLD_TOL and ez > grasp_z + 0.03
+                ),
+                over_bin=(xy_to_bin < _CARRY_TOL),
+                at_release_depth=(ez < _PLACE_Z + _GRASP_DEPTH_MARGIN),
+            )
+            if regrasp:
+                self._script_regrasp()
+            elif nxt != ph:
+                self._advance_phase(nxt)
+
             # ---- IK (transcribed from _gen_sim_demos.step_to) ----
             self._script_ik.reset()
-            cmd = torch.tensor([target + self._script_quat], device=dev, dtype=torch.float32)
+            cmd = torch.tensor(
+                [target + self._script_quat], device=dev, dtype=torch.float32
+            )
             rp, rq = robot.data.root_pos_w, robot.data.root_quat_w
             pos_b, quat_b = subtract_frame_transforms(
-                rp, rq, robot.data.body_pos_w[:, ee_idx, :], robot.data.body_quat_w[:, ee_idx, :]
+                rp,
+                rq,
+                robot.data.body_pos_w[:, ee_idx, :],
+                robot.data.body_quat_w[:, ee_idx, :],
             )
             self._script_ik.set_command(cmd, ee_pos=pos_b, ee_quat=quat_b)
             jac = robot.root_physx_view.get_jacobians()[
                 :, self._script_ee_jac, :6, [self._script_jac_off + j for j in arm_ids]
             ]
-            q_des = self._script_ik.compute(pos_b, quat_b, jac, robot.data.joint_pos[:, arm_ids])
+            q_des = self._script_ik.compute(
+                pos_b, quat_b, jac, robot.data.joint_pos[:, arm_ids]
+            )
             action = torch.zeros((1, self._script_adim), device=dev)
             for k, jid in enumerate(arm_ids):
                 action[0, jid] = (q_des[0, k] - qdef[0, jid]) / 0.5
@@ -488,8 +543,11 @@ class IsaacSO101Env(gym.Env):
             # lifting under the residual blend"). Off-path of the action; cheap.
             self._script_dbg_count = getattr(self, "_script_dbg_count", 0) + 1
             if self._script_dbg_count % 150 == 0:
-                print(f"[script-dbg] phase={self._script_phase} obj_lifted={obj_lifted} "
-                      f"oz={oz:.3f} ez={ez:.3f} xy_to_tgt={xy_to_tgt:.3f}", flush=True)
+                print(
+                    f"[script-dbg] phase={self._script_phase} obj_lifted={obj_lifted} "
+                    f"oz={oz:.3f} ez={ez:.3f} xy_to_tgt={xy_to_tgt:.3f}",
+                    flush=True,
+                )
             return action[0].detach().cpu().numpy().astype(np.float32)
         except Exception as exc:  # noqa: BLE001
             n = getattr(self, "_script_warn_count", 0) + 1
@@ -498,14 +556,17 @@ class IsaacSO101Env(gym.Env):
                 logger.warning(
                     "compute_scripted_action failed (residual skipped this step; "
                     "warning %d, further suppressed): %s",
-                    n, exc,
+                    n,
+                    exc,
                 )
             return None
 
     def render(self) -> np.ndarray:
         # Return HWC for sheeprl's RecordVideoV0 wrapper.
-        return self._last_rgb_hwc.copy() if hasattr(self, "_last_rgb_hwc") else (
-            np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        return (
+            self._last_rgb_hwc.copy()
+            if hasattr(self, "_last_rgb_hwc")
+            else (np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8))
         )
 
     def close(self) -> None:
@@ -554,10 +615,14 @@ class IsaacSO101Env(gym.Env):
         existing_app = None
         try:
             import omni.kit.app as _kit_app  # type: ignore[import]
+
             existing_app = _kit_app.get_app()
         except Exception:  # noqa: BLE001
             existing_app = None
-        if existing_app is not None and getattr(existing_app, "is_running", lambda: False)():
+        if (
+            existing_app is not None
+            and getattr(existing_app, "is_running", lambda: False)()
+        ):
             logger.info("SimulationApp already alive — skipping AppLauncher")
             self._app = existing_app
         else:
@@ -569,9 +634,7 @@ class IsaacSO101Env(gym.Env):
                     "Run `pixi install -e sim && pixi run install-isaac-lab` "
                     f"in the training workspace. ({exc})"
                 ) from exc
-            launcher = AppLauncher(
-                headless=self.headless, enable_cameras=True
-            )
+            launcher = AppLauncher(headless=self.headless, enable_cameras=True)
             self._app = launcher.app
             for _ in range(2):
                 self._app.update()
@@ -599,7 +662,10 @@ class IsaacSO101Env(gym.Env):
         if _GLOBAL_BACKING_ISAAC_ENV is None:
             logger.info(
                 "booting Isaac Lab env task=%s num_envs=%d headless=%s cameras=%s",
-                task_alias, self.num_envs, self.headless, self.enable_cameras,
+                task_alias,
+                self.num_envs,
+                self.headless,
+                self.enable_cameras,
             )
             _GLOBAL_BACKING_ISAAC_ENV = make_env(
                 task=task_alias,
@@ -622,7 +688,10 @@ class IsaacSO101Env(gym.Env):
         # true no-op for the 99% of runs that don't use it (no module-scope reference
         # held). Last-booted wins; the train wrapper boots first, the eval wrapper (if
         # any) boots later but the patch skips eval via the _in_eval guard.
-        if float(os.environ.get("LEROBOT_ISAAC_RESIDUAL_RL_WEIGHT", "0.0") or "0.0") > 0.0:
+        if (
+            float(os.environ.get("LEROBOT_ISAAC_RESIDUAL_RL_WEIGHT", "0.0") or "0.0")
+            > 0.0
+        ):
             global _LAST_WRAPPER
             _LAST_WRAPPER = self
 
@@ -726,9 +795,7 @@ class IsaacSO101Env(gym.Env):
         except NotImplementedError:
             # lerobot-isaac-env camera term is a stub; fall back to zeros
             # and remember so we don't retry every step.
-            rgb_np = np.zeros(
-                (self.image_size, self.image_size, 3), dtype=np.uint8
-            )
+            rgb_np = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
             self._has_camera_term = False
         else:
             self._has_camera_term = rgb_val is not None
@@ -810,7 +877,9 @@ class IsaacSO101Env(gym.Env):
             import torch.nn.functional as F
 
             t = torch.from_numpy(np.ascontiguousarray(chw_np)).unsqueeze(0).float()
-            t = F.interpolate(t, size=(size, size), mode="bilinear", align_corners=False)
+            t = F.interpolate(
+                t, size=(size, size), mode="bilinear", align_corners=False
+            )
             return t.squeeze(0).clamp_(0, 255).to(torch.uint8).numpy()
         except Exception:  # noqa: BLE001 — never let a resize break the rollout
             h, w = chw_np.shape[1], chw_np.shape[2]
