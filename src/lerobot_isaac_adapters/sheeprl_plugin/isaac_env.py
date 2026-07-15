@@ -554,9 +554,23 @@ class IsaacSO101Env(gym.Env):
             q_des = self._script_ik.compute(
                 pos_b, quat_b, jac, robot.data.joint_pos[:, arm_ids]
             )
+            # Per-joint action scale (C1 ee-descent fix, 2026-07-15): divide by the SAME
+            # per-joint scale the env applies (lerobot_isaac_env.load_action_scale_dict),
+            # so q_cmd == q_des and the residual clamp becomes a no-op. Cached once at
+            # first call. Defaults to 0.5 for every joint when LEROBOT_ISAAC_ACTION_SCALE_JSON
+            # is unset → byte-identical to the historical `/ 0.5` behaviour.
+            if not hasattr(self, "_script_arm_scales"):
+                try:
+                    from lerobot_isaac_env.so101_env_cfg import load_action_scale_dict
+
+                    _sd = load_action_scale_dict()
+                    _jn = robot.data.joint_names
+                    self._script_arm_scales = [float(_sd.get(_jn[jid], 0.5)) for jid in arm_ids]
+                except Exception:  # noqa: BLE001
+                    self._script_arm_scales = [0.5 for _ in arm_ids]
             action = torch.zeros((1, self._script_adim), device=dev)
             for k, jid in enumerate(arm_ids):
-                action[0, jid] = (q_des[0, k] - qdef[0, jid]) / 0.5
+                action[0, jid] = (q_des[0, k] - qdef[0, jid]) / self._script_arm_scales[k]
             action[0, grip_idx] = grip
             # diagnostic: periodically report which phase the scripted base reaches + whether the
             # die is lifted (disambiguates "episode too short to reach carry/place" vs "grasp not
