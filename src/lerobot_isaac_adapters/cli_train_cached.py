@@ -126,24 +126,44 @@ def main() -> int:
         return 127
 
     orig = getattr(_lerobot_train_module, "make_dataset", None)
-    if orig is None:
-        print(
-            "[cli_train_cached] ERROR: lerobot.scripts.lerobot_train has no "
-            "make_dataset symbol. Upstream API may have changed; falling "
-            "back to the uncached path is recommended.",
-            file=sys.stderr,
-        )
-        return 2
+    if orig is not None:
+        # lerobot 0.5.x: the train script binds make_dataset into its own
+        # namespace at import time — patch that local binding.
+        _lerobot_train_module.make_dataset = _patched_make_dataset_factory(orig)
+        # Belt-and-suspenders: also patch the canonical location so any other
+        # call sites pick up the wrapped version.
+        try:
+            from lerobot.datasets import factory as _factory_module
 
-    _lerobot_train_module.make_dataset = _patched_make_dataset_factory(orig)
-    # Belt-and-suspenders: also patch the canonical location so any other
-    # call sites pick up the wrapped version.
-    try:
-        from lerobot.datasets import factory as _factory_module
-
-        _factory_module.make_dataset = _lerobot_train_module.make_dataset
-    except ImportError:
-        pass
+            _factory_module.make_dataset = _lerobot_train_module.make_dataset
+        except ImportError:
+            pass
+        print("[cli_train_cached] cache patch applied (0.5.x local make_dataset)", flush=True)
+    else:
+        # lerobot 0.6.0+: the train script imports make_train_eval_datasets
+        # instead; that factory function resolves `make_dataset` from the
+        # factory module's namespace AT CALL TIME, so patching the canonical
+        # factory symbol is sufficient to wrap the train dataset (with the
+        # default eval_split=0.0 the full wrapped dataset is returned as-is).
+        try:
+            from lerobot.datasets import factory as _factory_module
+        except ImportError as exc:
+            print(
+                f"[cli_train_cached] ERROR: lerobot.datasets.factory not importable: {exc}",
+                file=sys.stderr,
+            )
+            return 2
+        orig_canonical = getattr(_factory_module, "make_dataset", None)
+        if orig_canonical is None:
+            print(
+                "[cli_train_cached] ERROR: neither lerobot.scripts.lerobot_train."
+                "make_dataset (0.5.x) nor lerobot.datasets.factory.make_dataset "
+                "(0.6.0) exists. Upstream API changed again; run the uncached path.",
+                file=sys.stderr,
+            )
+            return 2
+        _factory_module.make_dataset = _patched_make_dataset_factory(orig_canonical)
+        print("[cli_train_cached] cache patch applied (0.6.0 factory make_dataset)", flush=True)
 
     # LoRA monkey-patch: when LEROBOT_ISAAC_USE_LORA=1, wrap the policy with
     # PEFT LoRA adapters at policy-construction time (same in-process approach
