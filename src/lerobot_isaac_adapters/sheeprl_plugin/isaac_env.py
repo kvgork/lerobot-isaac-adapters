@@ -91,7 +91,7 @@ _STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
 
 # --- Reactive scripted-grasp controller thresholds (residual RL; see
 #     compute_scripted_action). All in metres, in the world frame. Tuned to the
-#     pick_and_place scene geometry (die rest z≈0.05, grasp_z≈0.106, z_high≈0.17 —
+#     pick_and_place scene geometry (die rest z≈0.05, grasp_z≈0.106, z_high≈0.19 —
 #     same waypoints as scripts/_gen_sim_demos.py). GPU-validation pending: these gate
 #     phase selection, so a wrong value mis-sequences the controller.
 _DIE_REST_Z = 0.05  # die resting height above table (object spawn z)
@@ -101,10 +101,16 @@ _REACH_MAX = 0.30  # reach-envelope clamp on the grasp target (max planar reach 
 _ALIGN_TOL = 0.015  # ee within this planar dist of the latched target ⇒ aligned
 _HIGH_MARGIN = 0.04  # ee above grasp_z+this ⇒ "high" (align here before descending)
 _GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
-_CLOSE_RAMP = 40  # steps over which the grip interpolates OPEN→CLOSE (slow cradle)
-_LIFT_RATE = 0.012  # max ee z rise per step during LIFT (gradual, not a yank)
-# NOTE: the phase SCHEDULE (order, per-phase step caps, STABILIZE/CLOSE dwell counts,
-# re-grasp cap) + the pure transition function live in
+_CLOSE_RAMP = 80  # steps over which the grip interpolates OPEN→CLOSE (slow cradle);
+# demo-parity (2026-07-20): the ramp now reaches full CLOSE exactly at CLOSE_DWELL's
+# end (scripts/_gen_sim_demos.py: 80-step close ramp, then a separate 25-step HOLD
+# at full close before lifting — see the new HOLD phase in compute_scripted_action).
+# NOTE: the old rate-limited LIFT-target constant was REMOVED in the same port —
+# LIFT now commands `z_high` DIRECTLY (see the LIFT branch below): the old
+# incremental target produced weak q_des deltas under the residual blend, which
+# campaign evidence traced to slipped lifts (die reached oz≈0.008 then dropped).
+# NOTE: the phase SCHEDULE (order, per-phase step caps, STABILIZE/CLOSE/HOLD dwell
+# counts, re-grasp cap) + the pure transition function live in
 # `lerobot_isaac_adapters.scripted_grasp_phases` (imported as `_phases`) so they are
 # unit-testable without the Isaac/gymnasium stack.
 # --- carry+place phases (extend the residual base from grasp+lift to the FULL pick-place,
@@ -332,14 +338,26 @@ class IsaacSO101Env(gym.Env):
             self._script_grasp_z = float(
                 os.environ.get("LEROBOT_ISAAC_GRASP_Z", "0.106")
             )
+            # Demo-parity (2026-07-20): 0.19 (LEROBOT_ISAAC_CARRY_Z default) clears the
+            # 7 cm cup rim — the die hangs ~0.096 below gripper_link, so z_high must
+            # clear grasp_z + the rim + that hang distance. The old 0.17 default maxed
+            # the die out at oz≈0.072 and undershot the demo's actual carry height.
             self._script_z_high = float(
-                os.environ.get("LEROBOT_ISAAC_SCRIPT_Z_HIGH", "0.17")
+                os.environ.get(
+                    "LEROBOT_ISAAC_SCRIPT_Z_HIGH",
+                    os.environ.get("LEROBOT_ISAAC_CARRY_Z", "0.19"),
+                )
             )
             self._script_tgt_x = float(os.environ.get("LEROBOT_ISAAC_TARGET_X", "0.22"))
             self._script_tgt_y = float(
                 os.environ.get("LEROBOT_ISAAC_TARGET_Y", "-0.13")
             )
             self._script_quat = [1.0, 0.0, 0.0, 0.0]  # straight-down grasp
+            # RELEASE ramps to a PARTIAL open, not full GRIP_OPEN: a full open spreads
+            # the fingers into the cup wall -> servo jam (finger-jam demo-gen, 2026-06-24).
+            self._script_part_open = float(
+                os.environ.get("LEROBOT_ISAAC_PLACE_PART_OPEN", "1.0")
+            )
             # Hybrid phase-machine state (per episode): demo-ordered, state-gated.
             self._script_reset_phase()
             self._script_ready = True
@@ -403,8 +421,8 @@ class IsaacSO101Env(gym.Env):
     def _advance_phase(self, nxt: str) -> None:
         """Enter phase ``nxt``: reset the per-phase step + close counters.
 
-        ``close_count`` is the internal counter for STABILIZE / CLOSE / RELEASE, so
-        it must start fresh on each phase entry; the other phases ignore it.
+        ``close_count`` is the internal counter for STABILIZE / CLOSE / HOLD / RELEASE,
+        so it must start fresh on each phase entry; the other phases ignore it.
         """
         self._script_phase = nxt
         self._script_phase_steps = 0
@@ -423,12 +441,13 @@ class IsaacSO101Env(gym.Env):
     def compute_scripted_action(self) -> np.ndarray | None:
         """Return a (action_dim,) scripted-grasp action for the CURRENT pre-step state.
 
-        HYBRID phase machine — demo-ORDERED (APPROACH→DESCEND→CLOSE→LIFT, the proven
-        sequence from _gen_sim_demos) but STATE-GATED transitions (robust to the residual
-        clamp rate-limiting motion). Critically: it ALIGNS the ee over the object while
-        HIGH before descending vertically, and only closes after a dwell — so it does NOT
-        knock the (16 mm) die sideways the way a naive "close when xy<3cm" reactive
-        controller does (diagnosed by the GPU probe: that pushed the die out of reach).
+        HYBRID phase machine — demo-ORDERED (APPROACH→DESCEND→CLOSE→HOLD→LIFT, the
+        proven sequence from _gen_sim_demos) but STATE-GATED transitions (robust to the
+        residual clamp rate-limiting motion). Critically: it ALIGNS the ee over the
+        object while HIGH before descending vertically, and only closes after a dwell —
+        so it does NOT knock the (16 mm) die sideways the way a naive "close when
+        xy<3cm" reactive controller does (diagnosed by the GPU probe: that pushed the
+        die out of reach).
         Same normalized action space as the policy (`(q_des-q_default)/0.5` for arm, grip
         in [-1,1]) → directly blendable. Phase state resets per episode (step()/reset()).
 
@@ -500,16 +519,22 @@ class IsaacSO101Env(gym.Env):
                 frac = min(1.0, self._script_close_count / _CLOSE_RAMP)
                 grip = GRIP_OPEN + (GRIP_CLOSE - GRIP_OPEN) * frac  # 1.0 → -1.0
                 target = [gx, gy, grasp_z]
-            elif ph == "LIFT":  # raise GRADUALLY (a yank breaks the grip)
-                target, grip = [gx, gy, min(z_high, ez + _LIFT_RATE)], GRIP_CLOSE
+            elif ph == "HOLD":  # firm closed grip at depth before lifting (demo-parity)
+                self._script_close_count += 1
+                target, grip = [gx, gy, grasp_z], GRIP_CLOSE
+            elif ph == "LIFT":  # raise DIRECTLY to z_high (demo-parity: no rate limit —
+                # the old incremental ez-plus-rate target under-drove the residual blend)
+                target, grip = [gx, gy, z_high], GRIP_CLOSE
             elif ph == "CARRY":  # move held+high to over the bin
                 target, grip = [tx, ty, z_high], GRIP_CLOSE
             elif ph == "LOWER":  # descend over the bin to release depth (closed)
                 target, grip = [tx, ty, _PLACE_Z], GRIP_CLOSE
-            else:  # RELEASE — gradual open to drop the die in
+            else:  # RELEASE — gradual open to drop the die in (PARTIAL open: a full
+                # open spreads the fingers into the cup wall -> servo jam)
                 self._script_close_count += 1
                 frac = min(1.0, self._script_close_count / _RELEASE_RAMP)
-                grip = GRIP_CLOSE + (GRIP_OPEN - GRIP_CLOSE) * frac  # -1.0 → 1.0
+                part_open = self._script_part_open
+                grip = GRIP_CLOSE + (part_open - GRIP_CLOSE) * frac  # -1.0 → part_open
                 target = [tx, ty, _PLACE_Z]
 
             # transition (pure; hard caps guarantee forward progress → never stalls)

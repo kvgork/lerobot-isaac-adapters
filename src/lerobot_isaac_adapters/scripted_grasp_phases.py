@@ -17,16 +17,31 @@ is OPEN-LOOP: it runs a fixed per-phase step schedule. This module mirrors that 
 each phase advances on its state gate (fast path) OR on a hard per-phase step cap
 (``PHASE_STEP_CAP``), guaranteeing monotonic forward progress so the machine can
 never stall. Backward re-grasp resets are bounded by ``MAX_REGRASPS``.
+
+Demo-schedule port (2026-07-20)
+--------------------------------
+The counts below (``PHASE_STEP_CAP`` + ``STABILIZE_STEPS`` / ``CLOSE_DWELL`` /
+``HOLD_STEPS``) now mirror ``scripts/_gen_sim_demos.py`` ``rollout()`` (lines
+224-235) EXACTLY: 50 approach-above + 90 descend + 30 settle + 80 close-ramp +
+25 firm hold + 60 lift + 60 carry + 40 lower (= 435 steps) + a 50-step RELEASE
+ramp (not capped here — it self-terminates on its own ramp counter in the
+consumer). The prior values (STABILIZE 20 / CLOSE 60 with no HOLD / DESCEND 60 /
+LIFT 90 / CARRY 150 / LOWER 60) were an earlier approximation; this port closes
+the gap against the ~80 %-success reference implementation. Do not edit
+``scripts/_gen_sim_demos.py`` — it is the frozen reference.
 """
 
 from __future__ import annotations
 
-# Fixed pick-place phase order.
+# Fixed pick-place phase order. HOLD sits between CLOSE and LIFT — a firm
+# closed-grip dwell at grasp depth before lifting (mirrors the demo's dedicated
+# "hold grip" segment, which the earlier CLOSE-only cradle+hold conflation lacked).
 PHASE_ORDER = [
     "APPROACH",
     "DESCEND",
     "STABILIZE",
     "CLOSE",
+    "HOLD",
     "LIFT",
     "CARRY",
     "LOWER",
@@ -34,21 +49,27 @@ PHASE_ORDER = [
 ]
 
 # Fixed internal counts for the phases that self-terminate on a dwell counter.
-STABILIZE_STEPS = 20  # settle (gripper open) at grasp depth before closing
-CLOSE_DWELL = 60  # total steps in CLOSE (gradual close + firm hold) before lifting
+STABILIZE_STEPS = 30  # settle (gripper open) at grasp depth before closing
+CLOSE_DWELL = 80  # PURE close ramp (OPEN -> CLOSE) before the firm HOLD phase
+HOLD_STEPS = 25  # firm closed grip at depth before lifting (demo "hold" segment)
 
 # Hard per-phase step caps: the phase force-advances at the cap even if its state
 # gate never clears (the stall fix). ``None`` ⇒ the phase self-terminates on its own
-# fixed count (STABILIZE_STEPS / CLOSE_DWELL, and RELEASE's own ramp). Values mirror
-# the demo's per-phase durations (sum ≈ 540 steps ⇒ use episodes ≥ ~600 steps).
+# fixed count (STABILIZE_STEPS / CLOSE_DWELL / HOLD_STEPS, and RELEASE's own ramp).
+# Values mirror scripts/_gen_sim_demos.py's per-phase durations exactly (sum of the
+# capped + dwell phases = 435 steps pre-RELEASE, + a 50-step release ramp ≈ 485
+# total ⇒ use episodes ≥ ~600 steps). LIFT/CARRY/LOWER caps double as the open-loop
+# schedule those phases run under (no early-exit gate expected to fire sooner in the
+# demo-parity case).
 PHASE_STEP_CAP: dict[str, int | None] = {
     "APPROACH": 50,
-    "DESCEND": 60,
+    "DESCEND": 90,
     "STABILIZE": None,
     "CLOSE": None,
-    "LIFT": 90,
-    "CARRY": 150,
-    "LOWER": 60,
+    "HOLD": None,
+    "LIFT": 60,
+    "CARRY": 60,
+    "LOWER": 40,
     "RELEASE": None,
 }
 
@@ -98,6 +119,12 @@ def next_phase(
             return "CLOSE", False
     elif phase == "CLOSE":
         if close_count >= CLOSE_DWELL:
+            return "HOLD", False
+    elif phase == "HOLD":
+        # Purely count-based, like STABILIZE/CLOSE — ignores all state gates so a
+        # noisy obj_lifted/ee_at_carry_height/not_holding reading can't cut the
+        # firm-hold dwell short (or trigger an early regrasp) before LIFT begins.
+        if close_count >= HOLD_STEPS:
             return "LIFT", False
     elif phase == "LIFT":
         if not_holding and regrasps < MAX_REGRASPS:

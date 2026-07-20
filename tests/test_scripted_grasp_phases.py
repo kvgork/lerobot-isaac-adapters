@@ -5,6 +5,10 @@ why it was extracted to ``lerobot_isaac_adapters.scripted_grasp_phases``. The
 headline invariant is the launch fix: **the machine can never stall** — every phase
 with a step cap force-advances at the cap even when its state gate never clears
 (the bug that pinned residual-RL in APPROACH under the blended, clamped action).
+
+``TestDemoParity`` covers the 2026-07-20 port of the proven demo-gen grasp
+schedule (``scripts/_gen_sim_demos.py`` ``rollout()``, lines 224-235) into this
+module: the new HOLD phase and the demo-matched per-phase durations.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ class TestNoStall:
         seen = [phase]
         for _ in range(2000):  # generous bound; must converge well inside it
             # advance the internal dwell counters for the fixed-count phases
-            if phase in ("STABILIZE", "CLOSE"):
+            if phase in ("STABILIZE", "CLOSE", "HOLD"):
                 close_count += 1
             nxt, regrasp = p.next_phase(
                 phase, phase_steps, close_count, regrasps, **_NO_GATES
@@ -92,7 +96,7 @@ class TestGates:
             False,
         )
         assert p.next_phase("CLOSE", 0, p.CLOSE_DWELL, 0, **_NO_GATES) == (
-            "LIFT",
+            "HOLD",
             False,
         )
 
@@ -143,6 +147,95 @@ class TestPhaseAfter:
         assert p.phase_after("APPROACH") == "DESCEND"
         assert p.phase_after("LOWER") == "RELEASE"
         assert p.phase_after("RELEASE") == "RELEASE"  # terminal clamp
+        assert p.phase_after("CLOSE") == "HOLD"
+        assert p.phase_after("HOLD") == "LIFT"
+
+
+class TestDemoParity:
+    """2026-07-20 port of scripts/_gen_sim_demos.py rollout()'s proven (~80 %
+    success) open-loop schedule (lines 224-235) into this phase machine."""
+
+    def test_phase_order_has_hold(self) -> None:
+        assert p.PHASE_ORDER == [
+            "APPROACH",
+            "DESCEND",
+            "STABILIZE",
+            "CLOSE",
+            "HOLD",
+            "LIFT",
+            "CARRY",
+            "LOWER",
+            "RELEASE",
+        ]
+
+    def test_demo_schedule_constants(self) -> None:
+        assert p.PHASE_STEP_CAP["APPROACH"] == 50
+        assert p.PHASE_STEP_CAP["DESCEND"] == 90
+        assert p.PHASE_STEP_CAP["LIFT"] == 60
+        assert p.PHASE_STEP_CAP["CARRY"] == 60
+        assert p.PHASE_STEP_CAP["LOWER"] == 40
+        assert p.STABILIZE_STEPS == 30
+        assert p.CLOSE_DWELL == 80
+        assert p.HOLD_STEPS == 25
+
+    def test_hold_waits_full_dwell(self) -> None:
+        assert p.next_phase("HOLD", 0, p.HOLD_STEPS - 1, 0, **_NO_GATES) == (
+            "HOLD",
+            False,
+        )
+        assert p.next_phase("HOLD", 0, p.HOLD_STEPS, 0, **_NO_GATES) == (
+            "LIFT",
+            False,
+        )
+
+    def test_hold_ignores_gates(self) -> None:
+        # Even with every other-phase gate wide open, HOLD is purely count-based:
+        # no early exit to LIFT, and no regrasp reset, before HOLD_STEPS elapses.
+        g = {
+            **_NO_GATES,
+            "obj_lifted": True,
+            "ee_at_carry_height": True,
+            "not_holding": True,
+        }
+        assert p.next_phase("HOLD", 0, p.HOLD_STEPS - 1, 0, **g) == ("HOLD", False)
+
+    def test_close_advances_to_hold(self) -> None:
+        assert p.next_phase("CLOSE", 0, p.CLOSE_DWELL, 0, **_NO_GATES) == (
+            "HOLD",
+            False,
+        )
+
+    def test_open_loop_walk_matches_demo_durations(self) -> None:
+        """Mirrors compute_scripted_action's real per-tick order (phase_steps
+        incremented BEFORE the gate/cap check) so the tick that trips a cap is the
+        LAST tick dispatched under the old phase — i.e. counts equal per-phase
+        wall-clock durations, not off-by-one. Must equal the demo's exact
+        per-phase step counts, summing to 435 pre-RELEASE steps."""
+        phase, phase_steps, close_count, regrasps = "APPROACH", 0, 0, 0
+        counts: dict[str, int] = {}
+        for _ in range(2000):
+            phase_steps += 1
+            if phase in ("STABILIZE", "CLOSE", "HOLD"):
+                close_count += 1
+            counts[phase] = counts.get(phase, 0) + 1
+            nxt, regrasp = p.next_phase(
+                phase, phase_steps, close_count, regrasps, **_NO_GATES
+            )
+            if regrasp or nxt != phase:
+                phase, phase_steps, close_count = nxt, 0, 0
+                if phase == "RELEASE":
+                    break
+        assert counts == {
+            "APPROACH": 50,
+            "DESCEND": 90,
+            "STABILIZE": 30,
+            "CLOSE": 80,
+            "HOLD": 25,
+            "LIFT": 60,
+            "CARRY": 60,
+            "LOWER": 40,
+        }
+        assert sum(counts.values()) == 435
 
 
 if __name__ == "__main__":  # pragma: no cover
