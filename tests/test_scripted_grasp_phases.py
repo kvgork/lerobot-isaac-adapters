@@ -238,5 +238,49 @@ class TestDemoParity:
         assert sum(counts.values()) == 435
 
 
+class TestTransitionFormat:
+    """Gate-parseability contract for ``format_phase_transition`` (2026-07-21 fix).
+
+    ``scripts/_residual_smoke_gate.sh`` (workspace, frozen reference) parses
+    ``[script-dbg]`` lines with
+    ``\\[script-dbg\\] phase=(\\w+) obj_lifted=(\\w+) oz=([\\-0-9.]+) ez=([\\-0-9.]+)``.
+    These tests pin that shape so the transition-only trace (replacing the old
+    fixed-150-cadence print, which aliased with 301-step episodes) stays
+    parseable.
+    """
+
+    def test_gate_regex_contract(self) -> None:
+        import re
+
+        line = p.format_phase_transition(
+            "LIFT", "HOLD", obj_lifted=True, oz=0.0812, ez=0.1734, t=207
+        )
+        m = re.findall(
+            r"\[script-dbg\] phase=(\w+) obj_lifted=(\w+) oz=([\-0-9.]+) ez=([\-0-9.]+)",
+            line,
+        )
+        assert m == [("LIFT", "True", "0.081", "0.173")]
+
+    def test_regrasp_suffix(self) -> None:
+        line = p.format_phase_transition(
+            "APPROACH", "LIFT", obj_lifted=False, oz=0.05, ez=0.2, t=310, regrasp=True
+        )
+        assert line.endswith(" REGRASP")
+        import re
+
+        m = re.findall(
+            r"\[script-dbg\] phase=(\w+) obj_lifted=(\w+) oz=([\-0-9.]+) ez=([\-0-9.]+)",
+            line,
+        )
+        assert m[0][0] == "APPROACH"
+
+    def test_t_and_prev_present(self) -> None:
+        line = p.format_phase_transition(
+            "LIFT", "HOLD", obj_lifted=True, oz=0.0812, ez=0.1734, t=207
+        )
+        assert "t=207" in line
+        assert "prev=HOLD" in line
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))

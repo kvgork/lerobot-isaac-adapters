@@ -141,3 +141,28 @@ def next_phase(
             return "RELEASE", False
     # RELEASE (or unknown): terminal — hold.
     return phase, False
+
+
+def format_phase_transition(
+    nxt: str,
+    prev: str,
+    *,
+    obj_lifted: bool,
+    oz: float,
+    ez: float,
+    t: int,
+    regrasp: bool = False,
+) -> str:
+    """Gate-parseable phase-transition line.
+
+    CONTRACT: scripts/_residual_smoke_gate.sh (workspace) parses this with
+    ``\\[script-dbg\\] phase=(\\w+) obj_lifted=(\\w+) oz=([\\-0-9.]+) ez=([\\-0-9.]+)``
+    — the prefix through ``ez=`` must not change shape. Extra fields go after.
+    ``t`` is the EPISODE-RELATIVE step (de-aliases the old fixed-150 cadence,
+    which sampled the same episode offset every time on 301-step episodes).
+    """
+    tail = " REGRASP" if regrasp else ""
+    return (
+        f"[script-dbg] phase={nxt} obj_lifted={obj_lifted} "
+        f"oz={oz:.3f} ez={ez:.3f} t={t} prev={prev}{tail}"
+    )

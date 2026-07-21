@@ -555,6 +555,16 @@ class IsaacSO101Env(gym.Env):
                 over_bin=(xy_to_bin < _CARRY_TOL),
                 at_release_depth=(ez < _PLACE_Z + _GRASP_DEPTH_MARGIN),
             )
+            if regrasp or nxt != ph:
+                # de-aliased trace: one line per phase TRANSITION with the
+                # episode-relative step (contract: _residual_smoke_gate.sh regex).
+                print(
+                    _phases.format_phase_transition(
+                        nxt, ph, obj_lifted=obj_lifted, oz=oz, ez=ez,
+                        t=self._t, regrasp=regrasp,
+                    ),
+                    flush=True,
+                )
             if regrasp:
                 self._script_regrasp()
             elif nxt != ph:
@@ -597,16 +607,6 @@ class IsaacSO101Env(gym.Env):
             for k, jid in enumerate(arm_ids):
                 action[0, jid] = (q_des[0, k] - qdef[0, jid]) / self._script_arm_scales[k]
             action[0, grip_idx] = grip
-            # diagnostic: periodically report which phase the scripted base reaches + whether the
-            # die is lifted (disambiguates "episode too short to reach carry/place" vs "grasp not
-            # lifting under the residual blend"). Off-path of the action; cheap.
-            self._script_dbg_count = getattr(self, "_script_dbg_count", 0) + 1
-            if self._script_dbg_count % 150 == 0:
-                print(
-                    f"[script-dbg] phase={self._script_phase} obj_lifted={obj_lifted} "
-                    f"oz={oz:.3f} ez={ez:.3f} xy_to_tgt={xy_to_tgt:.3f}",
-                    flush=True,
-                )
             return action[0].detach().cpu().numpy().astype(np.float32)
         except Exception as exc:  # noqa: BLE001
             n = getattr(self, "_script_warn_count", 0) + 1
@@ -739,6 +739,27 @@ class IsaacSO101Env(gym.Env):
                 task_alias,
             )
         self._isaac_env = _GLOBAL_BACKING_ISAAC_ENV
+        # Backing-cap fix (2026-07-21): the backing ManagerBasedRLEnv has its own
+        # episode_length_s time_out (default 10 s * 30 Hz = 300 steps) which fires
+        # BEFORE this wrapper's max_episode_steps cap (step() line ~270 only ADDS a
+        # truncation). The scripted pick->place needs ~485 steps, so a 300-step
+        # backing cap truncates mid-grasp — demo-gen disables it the same way
+        # (_gen_sim_demos.py). max_episode_length is a read-only derived property;
+        # bumping cfg.episode_length_s recomputes it. Wrapper truncation remains the
+        # single episode-length authority.
+        try:
+            backing_max = int(getattr(self._isaac_env, "max_episode_length", 0) or 0)
+            if backing_max and self.max_episode_steps > backing_max:
+                self._isaac_env.cfg.episode_length_s = 1.0e6
+                logger.info(
+                    "backing episode cap raised: max_episode_length %d -> %s "
+                    "(wrapper max_episode_steps=%d governs)",
+                    backing_max,
+                    getattr(self._isaac_env, "max_episode_length", "?"),
+                    self.max_episode_steps,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("could not raise backing episode cap: %s", exc)
         # Eager flag: warm-up below is best-effort; if it throws we must
         # NOT re-enter _boot() and re-create the SimulationContext.
         self._booted = True
