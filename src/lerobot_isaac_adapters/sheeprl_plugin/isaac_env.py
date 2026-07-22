@@ -94,9 +94,16 @@ _STATE_DIM_OBJECT_POSE = 7  # pos[3] + quat[4]
 #     pick_and_place scene geometry (die rest z≈0.05, grasp_z≈0.106, z_high≈0.19 —
 #     same waypoints as scripts/_gen_sim_demos.py). GPU-validation pending: these gate
 #     phase selection, so a wrong value mis-sequences the controller.
-_DIE_REST_Z = 0.05  # die resting height above table (object spawn z)
+_DIE_REST_Z = float(os.environ.get("LEROBOT_ISAAC_OBJECT_REST_Z", "0.008"))
+# ^ RESTING height of the die CENTER. The 0.267-scaled 16 mm die rests at z≈0.008
+# (half-height), NOT the unscaled 0.05 — with 0.05 the obj_lifted gate needed
+# oz>0.09, blind to the entire early lift (2026-07-21 trace). Override via env
+# for other object scales.
 _LIFT_MARGIN = 0.04  # die counts as "lifted" above rest+this
-_HOLD_TOL = 0.06  # ee↔die 3-D dist below which the die is deemed IN the gripper
+_HOLD_TOL = 0.13  # ee↔die 3-D dist above which the die is deemed DROPPED. A WORKING
+# grip carries the die at CONSTANT ~0.096 below gripper_link (GPU-verified
+# 2026-06-23), so the old 0.06 flagged every REAL lift as a drop -> guaranteed
+# spurious regrasp (2026-07-21 trace: REGRASP 1-2 steps after LIFT entry).
 _REACH_MAX = 0.30  # reach-envelope clamp on the grasp target (max planar reach ~0.346)
 _ALIGN_TOL = 0.015  # ee within this planar dist of the latched target ⇒ aligned
 _HIGH_MARGIN = 0.04  # ee above grasp_z+this ⇒ "high" (align here before descending)
