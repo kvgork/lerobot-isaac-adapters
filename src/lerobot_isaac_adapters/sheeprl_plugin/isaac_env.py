@@ -523,7 +523,6 @@ class IsaacSO101Env(gym.Env):
             tx, ty = self._script_tgt_x, self._script_tgt_y
             # Biased grasp-depth command, see _DESCEND_BIAS rationale above.
             grasp_tgt_z = grasp_z - _DESCEND_BIAS
-            z_high_cmd = z_high + _DESCEND_BIAS  # symmetric up-bias: IK settles ~12mm short of command (round-5: ee 0.165 at LIFT cap vs commanded 0.19 -> die 0.069, 1mm under the gate bar)
             if ph == "APPROACH":  # align over the die while HIGH (open)
                 target, grip = [gx, gy, z_high], GRIP_OPEN
             elif ph == "DESCEND":  # straight down to grasp depth (open)
@@ -541,9 +540,9 @@ class IsaacSO101Env(gym.Env):
                 target, grip = [gx, gy, grasp_tgt_z], GRIP_CLOSE
             elif ph == "LIFT":  # raise DIRECTLY to z_high (demo-parity: no rate limit —
                 # the old incremental ez-plus-rate target under-drove the residual blend)
-                target, grip = [gx, gy, z_high_cmd], GRIP_CLOSE
+                target, grip = [gx, gy, z_high], GRIP_CLOSE
             elif ph == "CARRY":  # move held+high to over the bin
-                target, grip = [tx, ty, z_high_cmd], GRIP_CLOSE
+                target, grip = [tx, ty, z_high], GRIP_CLOSE
             elif ph == "LOWER":  # descend over the bin to release depth (closed)
                 target, grip = [tx, ty, _PLACE_Z], GRIP_CLOSE
             else:  # RELEASE — gradual open to drop the die in (PARTIAL open: a full
