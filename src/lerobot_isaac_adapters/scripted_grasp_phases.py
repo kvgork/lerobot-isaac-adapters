@@ -166,3 +166,21 @@ def format_phase_transition(
         f"[script-dbg] phase={nxt} obj_lifted={obj_lifted} "
         f"oz={oz:.3f} ez={ez:.3f} t={t} prev={prev}{tail}"
     )
+# Phases where the actor may share authority. Mirrors demo-gen's DAgger noise
+# gating (scripts/_gen_sim_demos.py): noise only on approach/lift/carry/lower;
+# grasp-critical segments (descend/settle/close/hold/release) run script-pure.
+# residual-rl-v2 post-mortem (2026-07-22): UNIFORM blending broke the grasp at
+# any meaningful actor share — 0 carries in 10k steps.
+BLEND_SAFE_PHASES = frozenset({"APPROACH", "LIFT", "CARRY", "LOWER"})
+
+
+def blend_fraction(phase: str, script_frac: float) -> float:
+    """Effective script weight for this step.
+
+    Decayed ``script_frac`` applies only on blend-safe phases; grasp-critical
+    phases keep FULL script authority (1.0) for the whole run. The actor still
+    learns grasping in imagination (Dreamer trains the policy on world-model
+    rollouts, not on executed authority) — this gating protects the QUALITY of
+    collected experience, which uniform blending destroyed.
+    """
+    return script_frac if phase in BLEND_SAFE_PHASES else 1.0

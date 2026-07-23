@@ -282,5 +282,36 @@ class TestTransitionFormat:
         assert "prev=HOLD" in line
 
 
+class TestBlendGating:
+    """Phase-aware residual blend authority (residual-rl-v2 post-mortem).
+
+    Uniform blending broke the grasp at any meaningful actor share; the actor
+    may only share authority on the phases demo-gen's DAgger noise gating
+    perturbs (approach/lift/carry/lower). Grasp-critical phases keep full
+    script authority via ``blend_fraction``.
+    """
+
+    def test_safe_set_matches_demo_noise_flags(self) -> None:
+        assert p.BLEND_SAFE_PHASES == {"APPROACH", "LIFT", "CARRY", "LOWER"}
+
+    def test_every_phase_classified(self) -> None:
+        assert set(p.PHASE_ORDER) == p.BLEND_SAFE_PHASES | {
+            "DESCEND",
+            "STABILIZE",
+            "CLOSE",
+            "HOLD",
+            "RELEASE",
+        }
+
+    def test_critical_phase_full_script(self) -> None:
+        assert p.blend_fraction("CLOSE", 0.0) == 1.0
+        assert p.blend_fraction("HOLD", 0.37) == 1.0
+        assert p.blend_fraction("RELEASE", 0.0) == 1.0
+
+    def test_safe_phase_passthrough(self) -> None:
+        assert p.blend_fraction("CARRY", 0.37) == 0.37
+        assert p.blend_fraction("APPROACH", 0.0) == 0.0
+
+
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__, "-v"]))
