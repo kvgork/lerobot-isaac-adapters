@@ -108,6 +108,13 @@ _REACH_MAX = 0.30  # reach-envelope clamp on the grasp target (max planar reach 
 _ALIGN_TOL = 0.015  # ee within this planar dist of the latched target ⇒ aligned
 _HIGH_MARGIN = 0.04  # ee above grasp_z+this ⇒ "high" (align here before descending)
 _GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
+_DESCEND_BIAS = float(os.environ.get("LEROBOT_ISAAC_DESCEND_BIAS", "0.012"))
+# ^ Commanded grasp-depth overshoot. The DLS IK settles ~12-15 mm ABOVE its
+# commanded z near the kinematic floor (round-4 trace 2026-07-23: ee frozen at
+# 0.118-0.121 vs commanded 0.106 through 135 steps of STABILIZE/CLOSE/HOLD, at
+# script_frac~1). Biasing the command below the floor keeps downward IK error
+# active so the equilibrium lands ON grasp_z; the floor itself is kinematic
+# (joint limits), so the arm cannot overshoot physically. 0 disables.
 _CLOSE_RAMP = 80  # steps over which the grip interpolates OPEN→CLOSE (slow cradle);
 # demo-parity (2026-07-20): the ramp now reaches full CLOSE exactly at CLOSE_DWELL's
 # end (scripts/_gen_sim_demos.py: 80-step close ramp, then a separate 25-step HOLD
@@ -514,21 +521,23 @@ class IsaacSO101Env(gym.Env):
             self._script_phase_steps += 1
             ph = self._script_phase
             tx, ty = self._script_tgt_x, self._script_tgt_y
+            # Biased grasp-depth command, see _DESCEND_BIAS rationale above.
+            grasp_tgt_z = grasp_z - _DESCEND_BIAS
             if ph == "APPROACH":  # align over the die while HIGH (open)
                 target, grip = [gx, gy, z_high], GRIP_OPEN
             elif ph == "DESCEND":  # straight down to grasp depth (open)
-                target, grip = [gx, gy, grasp_z], GRIP_OPEN
+                target, grip = [gx, gy, grasp_tgt_z], GRIP_OPEN
             elif ph == "STABILIZE":  # settle open at depth (die sits between fingers)
-                target, grip = [gx, gy, grasp_z], GRIP_OPEN
+                target, grip = [gx, gy, grasp_tgt_z], GRIP_OPEN
                 self._script_close_count += 1
             elif ph == "CLOSE":  # gradual cradle-close (an instant close ejects it)
                 self._script_close_count += 1
                 frac = min(1.0, self._script_close_count / _CLOSE_RAMP)
                 grip = GRIP_OPEN + (GRIP_CLOSE - GRIP_OPEN) * frac  # 1.0 → -1.0
-                target = [gx, gy, grasp_z]
+                target = [gx, gy, grasp_tgt_z]
             elif ph == "HOLD":  # firm closed grip at depth before lifting (demo-parity)
                 self._script_close_count += 1
-                target, grip = [gx, gy, grasp_z], GRIP_CLOSE
+                target, grip = [gx, gy, grasp_tgt_z], GRIP_CLOSE
             elif ph == "LIFT":  # raise DIRECTLY to z_high (demo-parity: no rate limit —
                 # the old incremental ez-plus-rate target under-drove the residual blend)
                 target, grip = [gx, gy, z_high], GRIP_CLOSE

@@ -171,7 +171,12 @@ def format_phase_transition(
 # grasp-critical segments (descend/settle/close/hold/release) run script-pure.
 # residual-rl-v2 post-mortem (2026-07-22): UNIFORM blending broke the grasp at
 # any meaningful actor share — 0 carries in 10k steps.
-BLEND_SAFE_PHASES = frozenset({"APPROACH", "LIFT", "CARRY", "LOWER"})
+# LIFT moved to grasp-critical 2026-07-23 — the freshly-closed grip is the most
+# slip-fragile moment (v2 slip class); demo-gen's lift "noise OK" was a SMALL
+# additive perturbation, not authority replacement. APPROACH stays safe because
+# a wandered approach recovers via the force-advance into the script-pure
+# DESCEND (target re-latched, full authority).
+BLEND_SAFE_PHASES = frozenset({"APPROACH", "CARRY", "LOWER"})
 
 
 def blend_fraction(phase: str, script_frac: float) -> float:

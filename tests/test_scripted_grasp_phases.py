@@ -292,7 +292,7 @@ class TestBlendGating:
     """
 
     def test_safe_set_matches_demo_noise_flags(self) -> None:
-        assert p.BLEND_SAFE_PHASES == {"APPROACH", "LIFT", "CARRY", "LOWER"}
+        assert p.BLEND_SAFE_PHASES == {"APPROACH", "CARRY", "LOWER"}
 
     def test_every_phase_classified(self) -> None:
         assert set(p.PHASE_ORDER) == p.BLEND_SAFE_PHASES | {
@@ -300,6 +300,7 @@ class TestBlendGating:
             "STABILIZE",
             "CLOSE",
             "HOLD",
+            "LIFT",
             "RELEASE",
         }
 
@@ -307,6 +308,7 @@ class TestBlendGating:
         assert p.blend_fraction("CLOSE", 0.0) == 1.0
         assert p.blend_fraction("HOLD", 0.37) == 1.0
         assert p.blend_fraction("RELEASE", 0.0) == 1.0
+        assert p.blend_fraction("LIFT", 0.0) == 1.0
 
     def test_safe_phase_passthrough(self) -> None:
         assert p.blend_fraction("CARRY", 0.37) == 0.37
