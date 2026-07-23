@@ -431,6 +431,7 @@ class IsaacSO101Env(gym.Env):
         self._script_regrasps = (
             0  # bounded backward re-grasp count (see _phases.MAX_REGRASPS)
         )
+        self._script_ik_phase = None  # force fresh IK reset on episode's first step
 
     def _advance_phase(self, nxt: str) -> None:
         """Enter phase ``nxt``: reset the per-phase step + close counters.
@@ -587,7 +588,13 @@ class IsaacSO101Env(gym.Env):
                 self._advance_phase(nxt)
 
             # ---- IK (transcribed from _gen_sim_demos.step_to) ----
-            self._script_ik.reset()
+            # Demo-gen parity: reset the IK once per phase SEGMENT, not per step —
+            # per-step reset re-seeds DLS every step, so the controller never
+            # converges tightly on the held target (round-7: perfect descent depth,
+            # zero lifts across 6-9 attempts).
+            if getattr(self, "_script_ik_phase", None) != ph:
+                self._script_ik.reset()
+                self._script_ik_phase = ph
             cmd = torch.tensor(
                 [target + self._script_quat], device=dev, dtype=torch.float32
             )
