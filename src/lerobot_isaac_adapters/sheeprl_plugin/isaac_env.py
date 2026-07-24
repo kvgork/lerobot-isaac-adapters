@@ -107,7 +107,14 @@ _HOLD_TOL = 0.13  # ee↔die 3-D dist above which the die is deemed DROPPED. A W
 _REACH_MAX = 0.30  # reach-envelope clamp on the grasp target (max planar reach ~0.346)
 _ALIGN_TOL = 0.015  # ee within this planar dist of the latched target ⇒ aligned
 _HIGH_MARGIN = 0.04  # ee above grasp_z+this ⇒ "high" (align here before descending)
-_GRASP_DEPTH_MARGIN = 0.015  # ee below grasp_z+this ⇒ at grasp depth (start closing)
+_GRASP_DEPTH_MARGIN = 0.005  # ee below grasp_z+this ⇒ at grasp depth (start closing).
+# Tightened 0.015→0.005 (2026-07-24): at 0.015 the at_depth gate fired the moment
+# DESCEND crossed 0.121 — cutting the segment short exactly at the DLS small-error
+# stall point; STABILIZE's fresh IK segment then froze there (v3 trace). At 0.005
+# the early-exit fires only at genuine depth; otherwise DESCEND runs its full
+# 90-step cap, like demo-gen (which has no early exit at all). NOTE: shared by
+# at_release_depth — LOWER now typically force-advances at its cap (harmless;
+# the RELEASE ramp handles the drop).
 _DESCEND_BIAS = float(os.environ.get("LEROBOT_ISAAC_DESCEND_BIAS", "0.012"))
 # ^ Commanded grasp-depth overshoot. The DLS IK settles ~12-15 mm ABOVE its
 # commanded z near the kinematic floor (round-4 trace 2026-07-23: ee frozen at

@@ -176,7 +176,13 @@ def format_phase_transition(
 # additive perturbation, not authority replacement. APPROACH stays safe because
 # a wandered approach recovers via the force-advance into the script-pure
 # DESCEND (target re-latched, full authority).
-BLEND_SAFE_PHASES = frozenset({"APPROACH", "CARRY", "LOWER"})
+# APPROACH moved to grasp-critical 2026-07-24 — residual-rl-v3 trace: blended
+# approach (frac 0.8-0.93, newborn actor) left the arm at ez~0.31 instead of
+# staging at z_high 0.19, so DESCEND crossed the at_depth boundary mid-flight
+# and STABILIZE's fresh IK segment stalled at the 0.121 DLS equilibrium (the R4
+# freeze, reintroduced via bad staging). Actor authority remains on CARRY/LOWER
+# — the residual's actual learning targets.
+BLEND_SAFE_PHASES = frozenset({"CARRY", "LOWER"})
 
 
 def blend_fraction(phase: str, script_frac: float) -> float:
