@@ -18,14 +18,17 @@ each phase advances on its state gate (fast path) OR on a hard per-phase step ca
 (``PHASE_STEP_CAP``), guaranteeing monotonic forward progress so the machine can
 never stall. Backward re-grasp resets are bounded by ``MAX_REGRASPS``.
 
-Demo-schedule port (2026-07-20)
---------------------------------
-The counts below (``PHASE_STEP_CAP`` + ``STABILIZE_STEPS`` / ``CLOSE_DWELL`` /
-``HOLD_STEPS``) now mirror ``scripts/_gen_sim_demos.py`` ``rollout()`` (lines
-224-235) EXACTLY: 50 approach-above + 90 descend + 30 settle + 80 close-ramp +
-25 firm hold + 60 lift + 60 carry + 40 lower (= 435 steps) + a 50-step RELEASE
-ramp (not capped here — it self-terminates on its own ramp counter in the
-consumer). The prior values (STABILIZE 20 / CLOSE 60 with no HOLD / DESCEND 60 /
+Demo-schedule port (2026-07-20; SETTLE added 2026-07-24)
+--------------------------------------------------------
+The counts below (``PHASE_STEP_CAP`` + ``SETTLE_STEPS`` / ``STABILIZE_STEPS`` /
+``CLOSE_DWELL`` / ``HOLD_STEPS``) now mirror ``scripts/_gen_sim_demos.py``
+``rollout()`` (lines 224-235) EXACTLY, plus the episode-start settle both the
+probe and demo-gen run before approaching: 30 episode-start settle (SETTLE) +
+50 approach-above + 90 descend + 30 settle-at-depth + 80 close-ramp + 25 firm
+hold + 60 lift + 60 carry + 40 lower (30+50+90+30+80+25+60+60+40 = 465 steps
+pre-RELEASE) + a 50-step RELEASE ramp (not capped here — it self-terminates on
+its own ramp counter in the consumer), ≈ 515 total; episodes ≥ 600 still fine.
+The prior values (STABILIZE 20 / CLOSE 60 with no HOLD / DESCEND 60 /
 LIFT 90 / CARRY 150 / LOWER 60) were an earlier approximation; this port closes
 the gap against the ~80 %-success reference implementation. Do not edit
 ``scripts/_gen_sim_demos.py`` — it is the frozen reference.
@@ -33,10 +36,13 @@ the gap against the ~80 %-success reference implementation. Do not edit
 
 from __future__ import annotations
 
-# Fixed pick-place phase order. HOLD sits between CLOSE and LIFT — a firm
-# closed-grip dwell at grasp depth before lifting (mirrors the demo's dedicated
-# "hold grip" segment, which the earlier CLOSE-only cradle+hold conflation lacked).
+# Fixed pick-place phase order. SETTLE is the episode-start open-grip dwell
+# (probe/demo-gen parity — see SETTLE_STEPS). HOLD sits between CLOSE and LIFT —
+# a firm closed-grip dwell at grasp depth before lifting (mirrors the demo's
+# dedicated "hold grip" segment, which the earlier CLOSE-only cradle+hold
+# conflation lacked).
 PHASE_ORDER = [
+    "SETTLE",
     "APPROACH",
     "DESCEND",
     "STABILIZE",
@@ -49,19 +55,24 @@ PHASE_ORDER = [
 ]
 
 # Fixed internal counts for the phases that self-terminate on a dwell counter.
+# SETTLE: episode-start open-grip settle (zero arm action) — probe/demo-gen
+# parity; DR reset leaves joints/die in a transient the June-validated
+# kinematics never faced.
+SETTLE_STEPS = 30
 STABILIZE_STEPS = 30  # settle (gripper open) at grasp depth before closing
 CLOSE_DWELL = 80  # PURE close ramp (OPEN -> CLOSE) before the firm HOLD phase
 HOLD_STEPS = 25  # firm closed grip at depth before lifting (demo "hold" segment)
 
 # Hard per-phase step caps: the phase force-advances at the cap even if its state
 # gate never clears (the stall fix). ``None`` ⇒ the phase self-terminates on its own
-# fixed count (STABILIZE_STEPS / CLOSE_DWELL / HOLD_STEPS, and RELEASE's own ramp).
-# Values mirror scripts/_gen_sim_demos.py's per-phase durations exactly (sum of the
-# capped + dwell phases = 435 steps pre-RELEASE, + a 50-step release ramp ≈ 485
-# total ⇒ use episodes ≥ ~600 steps). LIFT/CARRY/LOWER caps double as the open-loop
-# schedule those phases run under (no early-exit gate expected to fire sooner in the
-# demo-parity case).
+# fixed count (SETTLE_STEPS / STABILIZE_STEPS / CLOSE_DWELL / HOLD_STEPS, and
+# RELEASE's own ramp). Values mirror scripts/_gen_sim_demos.py's per-phase durations
+# exactly (sum of the capped + dwell phases = 465 steps pre-RELEASE, + a 50-step
+# release ramp ≈ 515 total ⇒ use episodes ≥ ~600 steps). LIFT/CARRY/LOWER caps
+# double as the open-loop schedule those phases run under (no early-exit gate
+# expected to fire sooner in the demo-parity case).
 PHASE_STEP_CAP: dict[str, int | None] = {
+    "SETTLE": None,
     "APPROACH": 50,
     "DESCEND": 90,
     "STABILIZE": None,
@@ -108,7 +119,12 @@ def next_phase(
     """
     cap = PHASE_STEP_CAP.get(phase)
     forced = cap is not None and phase_steps >= cap
-    if phase == "APPROACH":
+    if phase == "SETTLE":
+        # Purely count-based, like STABILIZE — ignores all state gates; the
+        # episode-start transient must dwell out regardless of noisy readings.
+        if close_count >= SETTLE_STEPS:
+            return "APPROACH", False
+    elif phase == "APPROACH":
         if (aligned and ee_high) or forced:
             return "DESCEND", False
     elif phase == "DESCEND":
@@ -182,6 +198,8 @@ def format_phase_transition(
 # and STABILIZE's fresh IK segment stalled at the 0.121 DLS equilibrium (the R4
 # freeze, reintroduced via bad staging). Actor authority remains on CARRY/LOWER
 # — the residual's actual learning targets.
+# SETTLE (2026-07-24) is also critical — the zero-action settle must not be
+# perturbed (its whole point is a script-pure, actionless transient dwell).
 BLEND_SAFE_PHASES = frozenset({"CARRY", "LOWER"})
 
 

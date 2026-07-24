@@ -428,7 +428,7 @@ class IsaacSO101Env(gym.Env):
 
     def _script_reset_phase(self) -> None:
         """Full reset of the scripted-grasp phase machine for a NEW episode."""
-        self._script_phase = "APPROACH"
+        self._script_phase = "SETTLE"  # episode starts settling (open-grip, zero arm)
         self._script_gx = None  # target xy, latched at APPROACH (reach-clamped)
         self._script_gy = None
         self._script_close_count = 0
@@ -502,9 +502,12 @@ class IsaacSO101Env(gym.Env):
             ox, oy, oz = float(obj_pos[0]), float(obj_pos[1]), float(obj_pos[2])
             ex, ey, ez = float(ee_pos_w[0]), float(ee_pos_w[1]), float(ee_pos_w[2])
 
-            # Latch the grasp target xy at episode start, REACH-CLAMPED so the arm never
-            # chases a die that has been pushed out of the envelope (probe failure mode).
-            if self._script_gx is None:
+            ph = self._script_phase
+            # Latch the grasp target xy AFTER the episode-start SETTLE completes (not
+            # during it), so the die pose is read post-transient — the point of
+            # settling. REACH-CLAMPED so the arm never chases a die that has been
+            # pushed out of the envelope (probe failure mode).
+            if self._script_gx is None and ph != "SETTLE":
                 r = (ox * ox + oy * oy) ** 0.5
                 if r > _REACH_MAX and r > 1e-6:
                     s = _REACH_MAX / r
@@ -512,6 +515,8 @@ class IsaacSO101Env(gym.Env):
                 else:
                     self._script_gx, self._script_gy = ox, oy
             gx, gy = self._script_gx, self._script_gy
+            if gx is None:  # SETTLE: not latched yet — live die pos feeds the gate
+                gx, gy = ox, oy  # math below (SETTLE ignores all gates anyway)
 
             xy_to_tgt = ((ex - gx) ** 2 + (ey - gy) ** 2) ** 0.5
             ee_to_obj_3d = ((ex - ox) ** 2 + (ey - oy) ** 2 + (ez - oz) ** 2) ** 0.5
@@ -527,11 +532,13 @@ class IsaacSO101Env(gym.Env):
             # never satisfies (the diagnosed APPROACH stall). The gates remain as fast
             # early-exits when motion is clean.
             self._script_phase_steps += 1
-            ph = self._script_phase
             tx, ty = self._script_tgt_x, self._script_tgt_y
             # Biased grasp-depth command, see _DESCEND_BIAS rationale above.
             grasp_tgt_z = grasp_z - _DESCEND_BIAS
-            if ph == "APPROACH":  # align over the die while HIGH (open)
+            if ph == "SETTLE":  # episode-start settle: zero arm action, gripper open
+                self._script_close_count += 1
+                # (skip IK entirely — return the zero-arm/open-grip action right here)
+            elif ph == "APPROACH":  # align over the die while HIGH (open)
                 target, grip = [gx, gy, z_high], GRIP_OPEN
             elif ph == "DESCEND":  # straight down to grasp depth (open)
                 target, grip = [gx, gy, grasp_tgt_z], GRIP_OPEN
@@ -593,6 +600,13 @@ class IsaacSO101Env(gym.Env):
                 self._script_regrasp()
             elif nxt != ph:
                 self._advance_phase(nxt)
+
+            if ph == "SETTLE":
+                # Episode-start settle (probe/demo-gen parity): zero arm action +
+                # open grip, IK bypassed entirely — script-pure by construction.
+                action = torch.zeros((1, self._script_adim), device=dev)
+                action[0, grip_idx] = GRIP_OPEN
+                return action[0].detach().cpu().numpy().astype(np.float32)
 
             # ---- IK (transcribed from _gen_sim_demos.step_to) ----
             # Demo-gen parity: reset the IK once per phase SEGMENT, not per step —

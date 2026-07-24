@@ -9,6 +9,9 @@ with a step cap force-advances at the cap even when its state gate never clears
 ``TestDemoParity`` covers the 2026-07-20 port of the proven demo-gen grasp
 schedule (``scripts/_gen_sim_demos.py`` ``rollout()``, lines 224-235) into this
 module: the new HOLD phase and the demo-matched per-phase durations.
+``TestSettle`` covers the 2026-07-24 SETTLE phase — the episode-start open-grip
+settle that restores probe/demo-gen parity (both settle ~30 zero-action steps
+post-reset before approaching).
 """
 
 from __future__ import annotations
@@ -29,6 +32,9 @@ _NO_GATES = dict(
     at_release_depth=False,
 )
 
+# Dwell-counter phases: self-terminate on close_count, not on a step cap.
+_DWELL_PHASES = ("SETTLE", "STABILIZE", "CLOSE", "HOLD")
+
 
 class TestNoStall:
     """The launch fix: capped phases advance on the cap regardless of gates."""
@@ -48,12 +54,12 @@ class TestNoStall:
         assert nxt == p.phase_after(phase) and not regrasp
 
     def test_full_sequence_terminates_within_step_budget(self) -> None:
-        """Driving only the caps (no gates) walks APPROACH → RELEASE and stops."""
-        phase, phase_steps, close_count, regrasps = "APPROACH", 0, 0, 0
+        """Driving only the caps (no gates) walks SETTLE → RELEASE and stops."""
+        phase, phase_steps, close_count, regrasps = "SETTLE", 0, 0, 0
         seen = [phase]
         for _ in range(2000):  # generous bound; must converge well inside it
             # advance the internal dwell counters for the fixed-count phases
-            if phase in ("STABILIZE", "CLOSE", "HOLD"):
+            if phase in _DWELL_PHASES:
                 close_count += 1
             nxt, regrasp = p.next_phase(
                 phase, phase_steps, close_count, regrasps, **_NO_GATES
@@ -144,6 +150,7 @@ class TestRegrasp:
 
 class TestPhaseAfter:
     def test_order_and_clamp(self) -> None:
+        assert p.phase_after("SETTLE") == "APPROACH"
         assert p.phase_after("APPROACH") == "DESCEND"
         assert p.phase_after("LOWER") == "RELEASE"
         assert p.phase_after("RELEASE") == "RELEASE"  # terminal clamp
@@ -157,6 +164,7 @@ class TestDemoParity:
 
     def test_phase_order_has_hold(self) -> None:
         assert p.PHASE_ORDER == [
+            "SETTLE",
             "APPROACH",
             "DESCEND",
             "STABILIZE",
@@ -174,6 +182,7 @@ class TestDemoParity:
         assert p.PHASE_STEP_CAP["LIFT"] == 60
         assert p.PHASE_STEP_CAP["CARRY"] == 60
         assert p.PHASE_STEP_CAP["LOWER"] == 40
+        assert p.SETTLE_STEPS == 30
         assert p.STABILIZE_STEPS == 30
         assert p.CLOSE_DWELL == 80
         assert p.HOLD_STEPS == 25
@@ -210,12 +219,13 @@ class TestDemoParity:
         incremented BEFORE the gate/cap check) so the tick that trips a cap is the
         LAST tick dispatched under the old phase — i.e. counts equal per-phase
         wall-clock durations, not off-by-one. Must equal the demo's exact
-        per-phase step counts, summing to 435 pre-RELEASE steps."""
-        phase, phase_steps, close_count, regrasps = "APPROACH", 0, 0, 0
+        per-phase step counts (plus the episode-start SETTLE), summing to 465
+        pre-RELEASE steps."""
+        phase, phase_steps, close_count, regrasps = "SETTLE", 0, 0, 0
         counts: dict[str, int] = {}
         for _ in range(2000):
             phase_steps += 1
-            if phase in ("STABILIZE", "CLOSE", "HOLD"):
+            if phase in _DWELL_PHASES:
                 close_count += 1
             counts[phase] = counts.get(phase, 0) + 1
             nxt, regrasp = p.next_phase(
@@ -226,6 +236,7 @@ class TestDemoParity:
                 if phase == "RELEASE":
                     break
         assert counts == {
+            "SETTLE": 30,
             "APPROACH": 50,
             "DESCEND": 90,
             "STABILIZE": 30,
@@ -235,7 +246,33 @@ class TestDemoParity:
             "CARRY": 60,
             "LOWER": 40,
         }
-        assert sum(counts.values()) == 435
+        assert sum(counts.values()) == 465
+
+
+class TestSettle:
+    """2026-07-24 SETTLE phase — episode-start open-grip settle (zero arm action).
+
+    Probe 2026-07-24: pure-scripted grasp 40 % per-attempt at residual geometry
+    vs sheeprl path ≲10 %; probe + demo-gen both run ~30 zero-action settle
+    steps post-reset before approaching, while wrapper episodes used to start
+    APPROACH instantly on DR-perturbed joints — the largest remaining
+    structural delta. SETTLE is count-based like STABILIZE and ignores all
+    state gates.
+    """
+
+    def test_settle_ignores_gates(self) -> None:
+        # Every gate wide open: SETTLE still dwells until SETTLE_STEPS elapses.
+        g = {k: True for k in _NO_GATES}
+        assert p.next_phase("SETTLE", 0, p.SETTLE_STEPS - 1, 0, **g) == (
+            "SETTLE",
+            False,
+        )
+
+    def test_settle_advances_to_approach(self) -> None:
+        assert p.next_phase("SETTLE", 0, p.SETTLE_STEPS, 0, **_NO_GATES) == (
+            "APPROACH",
+            False,
+        )
 
 
 class TestTransitionFormat:
@@ -296,6 +333,7 @@ class TestBlendGating:
 
     def test_every_phase_classified(self) -> None:
         assert set(p.PHASE_ORDER) == p.BLEND_SAFE_PHASES | {
+            "SETTLE",
             "APPROACH",
             "DESCEND",
             "STABILIZE",
@@ -306,6 +344,7 @@ class TestBlendGating:
         }
 
     def test_critical_phase_full_script(self) -> None:
+        assert p.blend_fraction("SETTLE", 0.0) == 1.0
         assert p.blend_fraction("CLOSE", 0.0) == 1.0
         assert p.blend_fraction("HOLD", 0.37) == 1.0
         assert p.blend_fraction("RELEASE", 0.0) == 1.0
