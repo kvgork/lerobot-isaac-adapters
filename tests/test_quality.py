@@ -132,155 +132,55 @@ class TestDryRun:
         ds.mkdir()
         output_path = tmp_path / "my_dataset_filtered"
 
-        # Mock _import_skill to fail so we exercise the subprocess path
-        with (
-            patch("lerobot_isaac_adapters.quality._import_skill", return_value=None),
-            patch(
-                "lerobot_isaac_adapters.quality._invoke_skill_subprocess"
-            ) as mock_sub,
-        ):
-            from lerobot_isaac_adapters.quality import OperationResult
-
-            mock_sub.return_value = OperationResult(
-                success=True,
-                data={"kept": 5, "removed": 2, "dry_run": True},
-            )
-            result = apply_quality_filter(
-                dataset_path=ds,
-                output_path=output_path,
-                dry_run=True,
-            )
-
-        assert result.success
-        # Output path should NOT have been created (dry_run)
-        assert not output_path.exists()
-        mock_sub.assert_called_once()
-
-
-# ---------------------------------------------------------------------------
-# Tier 1 import mocking
-# ---------------------------------------------------------------------------
-
-
-class TestTier1Import:
-    def test_tier1_success_calls_skill(self, tmp_path: Path):
-        """When _import_skill succeeds, apply_quality_filter calls it."""
-        from lerobot_isaac_adapters.quality import apply_quality_filter
-
-        ds = tmp_path / "dataset"
-        ds.mkdir()
-
-        mock_filter = MagicMock(
-            return_value=MagicMock(
-                success=True,
-                data={"kept": 8, "removed": 2},
-                error=None,
-                suggestions=None,
-            )
+        result = apply_quality_filter(
+            dataset_path=ds, output_path=output_path, dry_run=True,
         )
+        # No parquet in the dir -> the in-process filter returns a graceful failure;
+        # dry_run never writes the output dir either way.
+        assert result.success is False
+        assert not output_path.exists()
 
-        with patch(
-            "lerobot_isaac_adapters.quality._import_skill", return_value=mock_filter
-        ):
-            result = apply_quality_filter(dataset_path=ds)
 
-        assert result.success
+# ---------------------------------------------------------------------------
+# In-process delegation to the package quality module (replaces the old
+# CLAUDE_CODE_ROOT sys.path-inject + python -c subprocess two-tier bridge,
+# which was removed when the SAL/TED logic moved into
+# lerobot_isaac_adapters.data.dataset_quality).
+# ---------------------------------------------------------------------------
+
+
+class TestInProcessDelegation:
+    def test_delegates_to_package_filter_dataset(self, tmp_path: Path):
+        """apply_quality_filter calls the in-package filter_dataset directly."""
+        import lerobot_isaac_adapters.quality as qmod
+        from lerobot_isaac_adapters.quality import apply_quality_filter, OperationResult
+
+        ds = tmp_path / "dataset"
+        ds.mkdir()
+        with patch.object(qmod, "_filter_dataset") as mock_filter:
+            mock_filter.return_value = OperationResult(
+                success=True, data={"kept": 8, "removed": 2}
+            )
+            result = apply_quality_filter(dataset_path=ds, sal_threshold=0.2)
+
         mock_filter.assert_called_once()
+        _, kwargs = mock_filter.call_args
+        # sal_threshold 0.2 -> filter_percentile 20, composite SAL+TED strategy
+        assert kwargs.get("filter_percentile") == 20
+        assert kwargs.get("strategy") == "composite"
+        assert result.success and result.data["kept"] == 8
 
-    def test_tier1_exception_falls_back_to_tier2(self, tmp_path: Path):
-        """If _import_skill returns callable but calling it raises, Tier 2 is used."""
-        from lerobot_isaac_adapters.quality import apply_quality_filter, OperationResult
+    def test_operation_result_is_package_type(self):
+        """OperationResult is sourced from the package quality module (single type)."""
+        from lerobot_isaac_adapters.quality import OperationResult as QResult
+        from lerobot_isaac_adapters.data.dataset_quality import OperationResult as PResult
 
-        ds = tmp_path / "dataset"
-        ds.mkdir()
+        assert QResult is PResult
 
-        def raise_on_call(*args, **kwargs):
-            raise RuntimeError("simulated skill failure")
-
-        with (
-            patch(
-                "lerobot_isaac_adapters.quality._import_skill",
-                return_value=raise_on_call,
-            ),
-            patch(
-                "lerobot_isaac_adapters.quality._invoke_skill_subprocess"
-            ) as mock_sub,
-        ):
-            mock_sub.return_value = OperationResult(success=True, data={"kept": 5})
-            result = apply_quality_filter(dataset_path=ds)
-
-        mock_sub.assert_called_once()
-        assert result.success
-
-
-# ---------------------------------------------------------------------------
-# Tier 2 subprocess mocking
-# ---------------------------------------------------------------------------
-
-
-class TestTier2Subprocess:
-    def test_tier2_called_when_tier1_fails(self, tmp_path: Path):
-        from lerobot_isaac_adapters.quality import apply_quality_filter, OperationResult
-
-        ds = tmp_path / "dataset"
-        ds.mkdir()
-
-        with (
-            patch("lerobot_isaac_adapters.quality._import_skill", return_value=None),
-            patch(
-                "lerobot_isaac_adapters.quality._invoke_skill_subprocess"
-            ) as mock_sub,
-        ):
-            mock_sub.return_value = OperationResult(
-                success=True,
-                data={"kept": 10, "removed": 3},
-            )
-            result = apply_quality_filter(dataset_path=ds)
-
-        mock_sub.assert_called_once()
-        assert result.success
-        assert result.data["kept"] == 10
-
-    def test_tier2_failure_propagates(self, tmp_path: Path):
-        from lerobot_isaac_adapters.quality import apply_quality_filter, OperationResult
-
-        ds = tmp_path / "dataset"
-        ds.mkdir()
-
-        with (
-            patch("lerobot_isaac_adapters.quality._import_skill", return_value=None),
-            patch(
-                "lerobot_isaac_adapters.quality._invoke_skill_subprocess"
-            ) as mock_sub,
-        ):
-            mock_sub.return_value = OperationResult(
-                success=False,
-                error="subprocess failed",
-                suggestions=["check CLAUDE_CODE_ROOT"],
-            )
-            result = apply_quality_filter(dataset_path=ds)
-
-        assert not result.success
-        assert "subprocess" in (result.error or "").lower()
-
-
-# ---------------------------------------------------------------------------
-# CLAUDE_CODE_ROOT constant
-# ---------------------------------------------------------------------------
-
-
-class TestClaudeCodeRoot:
-    def test_claude_code_root_is_path(self):
-        from lerobot_isaac_adapters.quality import CLAUDE_CODE_ROOT
-
-        assert isinstance(CLAUDE_CODE_ROOT, Path)
-
-    def test_env_var_overrides_root(self, monkeypatch, tmp_path: Path):
-        monkeypatch.setenv("LEROBOT_CLAUDE_CODE_ROOT", str(tmp_path))
+    def test_legacy_bridge_internals_removed(self):
+        """The old CLAUDE_CODE_ROOT / subprocess bridge is gone."""
         import lerobot_isaac_adapters.quality as qmod
 
-        importlib.reload(qmod)
-        assert tmp_path == qmod.CLAUDE_CODE_ROOT
-        # Cleanup: reload with original value
-        monkeypatch.delenv("LEROBOT_CLAUDE_CODE_ROOT", raising=False)
-        importlib.reload(qmod)
+        assert not hasattr(qmod, "CLAUDE_CODE_ROOT")
+        assert not hasattr(qmod, "_invoke_skill_subprocess")
+        assert not hasattr(qmod, "_import_skill")

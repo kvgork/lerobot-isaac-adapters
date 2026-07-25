@@ -2,9 +2,11 @@
 
 **Phase:** 2 (training adapter)
 **Role:** Single entrypoint for all training runs. Dispatches by `--target_arch` to policy
-(smolvla/act/diffusion) or world-model (dreamerv3/le_world_model) backends.
+(smolvla/act/diffusion), lerobot 0.6.0 world-model policy (vla_jepa/fastwam/lingbot_va),
+or predictive world-model (dreamerv3/le_world_model) backends.
 **Status:** All three backends wired with subprocess dispatch + metric extraction.
-Dry-run smoke passes for `smolvla` / `act` / `diffusion` / `dreamerv3` / `le_world_model`.
+Dry-run smoke passes for `smolvla` / `act` / `diffusion` / `vla_jepa` / `fastwam` /
+`lingbot_va` / `dreamerv3` / `le_world_model`.
 Real training requires `lerobot-train` (policy) or `sheeprl` (DreamerV3) installed.
 
 ---
@@ -42,7 +44,7 @@ Console script: `lerobot-isaac-train` → `lerobot_isaac_adapters.train:main`
 | File | Purpose |
 |------|---------|
 | `src/lerobot_isaac_adapters/train.py` | argparse + dispatch router |
-| `src/lerobot_isaac_adapters/targets/policy_lerobot.py` | smolvla/act/diffusion — spawns `lerobot-train` subprocess. `--successes_only` reads the recorder's `meta/episode_labels.json` sidecar (inline JSON; NO `robot_data_recorder` import — coupling rule) and forwards successful indices via `--dataset.episodes`. Single local dataset only. |
+| `src/lerobot_isaac_adapters/targets/policy_lerobot.py` | smolvla/act/diffusion + lerobot 0.6.0 WM policies vla_jepa/fastwam/lingbot_va — spawns `lerobot-train` subprocess (maps `target_arch`→`--policy.type` 1:1; omits `--policy.type` when a pretrained `--policy.path=` is passed, e.g. `-- --policy.path=lerobot/VLA-JEPA-Pretrain`). `--successes_only` reads the recorder's `meta/episode_labels.json` sidecar (inline JSON; NO `robot_data_recorder` import — coupling rule) and forwards successful indices via `--dataset.episodes`. Single local dataset only. |
 | `src/lerobot_isaac_adapters/targets/wm_dreamerv3.py` | DreamerV3 — `lerobot_world_model_bridge` Parquet→HDF5 (64×64) + `sheeprl exp=dreamer_v3` subprocess; parses `recon_loss=` |
 | `src/lerobot_isaac_adapters/targets/wm_leworldmodel.py` | HF LeWorldModel — bridge Parquet→HDF5 (96×96, win=16) + `python -m lerobot.scripts.train_world_model`; parses `pred_loss=` |
 | `src/lerobot_isaac_adapters/metric_extractor.py` | canonical stdout metric emitter |
@@ -61,6 +63,7 @@ Parsed by `autoresearch-ml-executor-worker` regex: `(\w+)[=:\s]+([0-9.eE+-]+)`.
 | arch | metric name | direction |
 |------|-------------|-----------|
 | smolvla/act/diffusion | `pc_success` | maximize |
+| vla_jepa/fastwam/lingbot_va | `pc_success` | maximize |
 | dreamerv3 | `recon_loss` | minimize |
 | le_world_model | `pred_loss` | minimize |
 

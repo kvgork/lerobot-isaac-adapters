@@ -16,8 +16,18 @@ The ``--target_arch`` argument determines which backend is invoked:
 - ``smolvla``        -> ``targets.policy_lerobot.run()``
 - ``act``            -> ``targets.policy_lerobot.run()``
 - ``diffusion``      -> ``targets.policy_lerobot.run()``
+- ``vla_jepa``       -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
+- ``fastwam``        -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
+- ``lingbot_va``     -> ``targets.policy_lerobot.run()``  (lerobot >=0.6.0 WM policy)
 - ``dreamerv3``      -> ``targets.wm_dreamerv3.run()``
 - ``le_world_model`` -> ``targets.wm_leworldmodel.run()``
+
+The ``vla_jepa`` / ``fastwam`` / ``lingbot_va`` archs are the world-model
+*policies* introduced in lerobot 0.6.0. They are ordinary LeRobot policies
+(they emit ``pc_success``) that use a world model as a training-time auxiliary,
+so they dispatch through the same ``lerobot-train`` subprocess as the plain
+policies — NOT through the predictive world-model backends (dreamerv3 /
+le_world_model), which are a different concept.
 
 All backends accept the same ``argparse.Namespace`` argument and emit metrics
 to stdout via ``metric_extractor.emit()``.
@@ -32,8 +42,18 @@ import argparse
 import sys
 
 _POLICY_ARCHS = ("smolvla", "act", "diffusion")
+# lerobot >=0.6.0 world-model policies. These are POLICIES (they emit
+# pc_success) that use a world model as a *training-time* auxiliary; they
+# dispatch through the same `lerobot-train` subprocess as the plain policies
+# above (targets.policy_lerobot), NOT through the predictive world-model
+# backends below. vla_jepa (~2B, WM dropped at inference, ships pretrained
+# ckpts) is the only one that fits an RTX 3080 10GB; fastwam (~5B) and
+# lingbot_va (~5B + ~20GB frozen components) are registered for larger
+# hardware — see docs/runbook/03-train-policy.md and the RTX-3080 pitfalls.
+_WM_POLICY_ARCHS = ("vla_jepa", "fastwam", "lingbot_va")
+# Predictive world-model backends (separate dispatch + their own metrics).
 _WM_ARCHS = ("dreamerv3", "le_world_model")
-_ALL_ARCHS = _POLICY_ARCHS + _WM_ARCHS
+_ALL_ARCHS = _POLICY_ARCHS + _WM_POLICY_ARCHS + _WM_ARCHS
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -41,8 +61,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="lerobot-isaac-train",
         description=(
             "Unified training entrypoint for LeRobot + Isaac Lab.\n"
-            "Dispatches to policy (smolvla/act/diffusion) or world-model "
-            "(dreamerv3/le_world_model) backends based on --target_arch."
+            "Dispatches to policy (smolvla/act/diffusion), lerobot 0.6.0 "
+            "world-model policy (vla_jepa/fastwam/lingbot_va), or predictive "
+            "world-model (dreamerv3/le_world_model) backends based on --target_arch."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -62,7 +83,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Training backend to use. "
             f"Policy archs: {', '.join(_POLICY_ARCHS)}. "
-            f"World-model archs: {', '.join(_WM_ARCHS)}."
+            f"World-model policy archs (lerobot >=0.6.0): "
+            f"{', '.join(_WM_POLICY_ARCHS)}. "
+            f"Predictive world-model archs: {', '.join(_WM_ARCHS)}."
         ),
     )
     parser.add_argument(
@@ -218,6 +241,81 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default: %(default)s."
         ),
     )
+    # --- sheeprl exp selection (Plan2Explore / p2e_dv3) ------------------
+    parser.add_argument(
+        "--exp",
+        default=None,
+        metavar="EXP_NAME",
+        help=(
+            "sheeprl experiment config name passed as 'exp=<name>' to the "
+            "hydra composition (dreamerv3 backend only). Defaults to "
+            "'dreamer_v3'. Use 'p2e_dv3_exploration' for reward-free "
+            "Plan2Explore intrinsic-reward pre-training, or "
+            "'p2e_dv3_finetuning' to resume with extrinsic rewards. "
+            "The env var LEROBOT_ISAAC_EXP is also consulted when this flag "
+            "is not set. Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--exploration_ckpt",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Absolute path to a p2e_dv3_exploration checkpoint directory. "
+            "Required (or set via LEROBOT_ISAAC_EXPLORATION_CKPT env var) "
+            "when --exp p2e_dv3_finetuning is used and "
+            "'checkpoint.exploration_ckpt_path=' is not already present in "
+            "the remainder. Forwarded to sheeprl as "
+            "'checkpoint.exploration_ckpt_path=<path>'."
+        ),
+    )
+    parser.add_argument(
+        "--resume_from",
+        default=None,
+        metavar="PATH",
+        help=(
+            "Resume a sheeprl world-model run from a checkpoint (dreamerv3 "
+            "backend only). Forwarded to sheeprl as "
+            "'checkpoint.resume_from=<path>' for ANY exp (native sheeprl "
+            "resume). The env var LEROBOT_ISAAC_RESUME_FROM is also consulted "
+            "when this flag is not set. Distinct from --exploration_ckpt, which "
+            "is the Plan2Explore finetuning-only exploration weight path. "
+            "Ignored by policy backends."
+        ),
+    )
+    # --- world-model bridge conversion overrides (dreamerv3 backend) ------
+    parser.add_argument(
+        "--camera_key",
+        default=None,
+        metavar="KEY",
+        help=(
+            "Dataset image-observation key to convert (dreamerv3 backend "
+            "only), e.g. 'observation.images.overhead'. Forwarded to the "
+            "world-model bridge as image_keys=[<key>]. If omitted, the bridge "
+            "auto-detects the image key(s). Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--state_keys",
+        default=None,
+        metavar="KEY1,KEY2,...",
+        help=(
+            "Comma-separated dataset state-observation keys to convert "
+            "(dreamerv3 backend only), e.g. 'observation.state'. Forwarded to "
+            "the world-model bridge as state_keys=[...]. If omitted, the bridge "
+            "auto-detects the state key(s). Ignored by policy backends."
+        ),
+    )
+    parser.add_argument(
+        "--image_size",
+        default=None,
+        metavar="N | H,W",
+        help=(
+            "Override the world-model bridge image size (dreamerv3 backend "
+            "only). Either a single int N giving an (N, N) square, or 'H,W'. "
+            "If omitted, defaults to 64,64. Ignored by policy backends."
+        ),
+    )
     # Capture any extra args after '--' to forward to the backend
     parser.add_argument(
         "remainder",
@@ -300,7 +398,10 @@ def _dispatch(args: argparse.Namespace) -> int:
 
     arch = args.target_arch
 
-    if arch in _POLICY_ARCHS:
+    if arch in _POLICY_ARCHS or arch in _WM_POLICY_ARCHS:
+        # Plain policies AND lerobot 0.6.0 world-model policies both train via
+        # the `lerobot-train` subprocess (policy_lerobot maps target_arch ->
+        # --policy.type 1:1) and report pc_success.
         from lerobot_isaac_adapters.targets import policy_lerobot as backend
     elif arch == "dreamerv3":
         from lerobot_isaac_adapters.targets import wm_dreamerv3 as backend  # type: ignore[assignment]
